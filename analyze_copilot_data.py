@@ -27,6 +27,40 @@ from datetime import datetime
 from collections import defaultdict
 
 
+# Mapping from activity report surface names to JSON IDE names
+SURFACE_TO_IDE_MAP = {
+    'vscode': ['vscode'],
+    'jetbrains-iu': ['intellij'],
+    'jetbrains-py': ['pycharm'],
+    'jetbrains-cl': ['clion'],
+    'jetbrains-go': ['goland'],
+    'jetbrains-rm': ['rubymine'],
+    'jetbrains-ws': ['webstorm'],
+    'jetbrains-rd': ['rider'],
+    'jetbrains-ps': ['phpstorm'],
+    'jetbrains-db': ['datagrip'],
+    'visualstudio': ['visualstudio'],
+    'neovim': ['neovim'],
+    'vim': ['vim'],
+    'emacs': ['emacs'],
+    'xcode': ['xcode'],
+}
+
+
+def normalize_surface(surface):
+    """
+    Normalize a surface name from activity report to comparable IDE names.
+    
+    Args:
+        surface: Surface name from activity report (e.g., 'JetBrains-IU')
+        
+    Returns:
+        Set of possible matching IDE names from JSON
+    """
+    surface_lower = surface.lower()
+    return set(SURFACE_TO_IDE_MAP.get(surface_lower, [surface_lower]))
+
+
 def parse_json_files(json_files):
     """
     Parse multiple JSON/NDJSON files and extract key fields.
@@ -35,11 +69,13 @@ def parse_json_files(json_files):
         json_files: List of paths to JSON files
         
     Returns:
-        Tuple of (list of row dicts, user_dates dict, report_start_day, report_end_day)
+        Tuple of (list of row dicts, user_dates dict, user_ides dict, report_start_day, report_end_day)
         user_dates maps user_login -> set of activity dates (YYYY-MM-DD)
+        user_ides maps user_login -> set of IDE names
     """
     rows = []
     user_dates = defaultdict(set)  # Track all activity dates per user
+    user_ides = defaultdict(set)   # Track all IDEs per user
     report_start = None
     report_end = None
     
@@ -97,6 +133,10 @@ def parse_json_files(json_files):
                         for ide_info in totals_by_ide:
                             ide = ide_info.get('ide', '')
                             
+                            # Track IDEs per user
+                            if user_login and ide:
+                                user_ides[user_login].add(ide.lower())
+                            
                             # Get IDE version
                             last_known_ide_version = ide_info.get('last_known_ide_version', {})
                             ide_version = last_known_ide_version.get('ide_version', '')
@@ -133,10 +173,10 @@ def parse_json_files(json_files):
                     print(f"  Warning: Error parsing JSON in {filepath}: {e}")
                     continue
     
-    return rows, user_dates, report_start, report_end
+    return rows, user_dates, user_ides, report_start, report_end
 
 
-def find_discrepancies(distilled_rows, user_dates, activity_report_path, report_start, report_end):
+def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_path, report_start, report_end):
     """
     Find users who are active in the activity report within the report window
     but have discrepancies with the JSON usage data.
@@ -144,6 +184,7 @@ def find_discrepancies(distilled_rows, user_dates, activity_report_path, report_
     Args:
         distilled_rows: List of row dicts from distilled data
         user_dates: Dict mapping user_login -> set of activity dates from JSON
+        user_ides: Dict mapping user_login -> set of IDE names from JSON
         activity_report_path: Path to activity report CSV
         report_start: Report start date (YYYY-MM-DD)
         report_end: Report end date (YYYY-MM-DD)
@@ -167,6 +208,7 @@ def find_discrepancies(distilled_rows, user_dates, activity_report_path, report_
         'users_active_in_window': 0,
         'missing_count': 0,
         'date_mismatch_count': 0,
+        'ide_mismatch_count': 0,
         'missing_surface_breakdown': defaultdict(int),
         'date_mismatch_surface_breakdown': defaultdict(int)
     }
@@ -203,30 +245,49 @@ def find_discrepancies(distilled_rows, user_dates, activity_report_path, report_
                             
                             # Create row with discrepancy info
                             discrepancy_row = dict(row)
-                            discrepancy_row['Discrepancy Type'] = 'missing_from_json'
                             discrepancy_row['JSON Activity Dates'] = ''
                             discrepancy_row['Latest JSON Date'] = ''
+                            discrepancy_row['JSON IDEs'] = ''
+                            discrepancy_row['IDE Mismatch'] = ''
                             all_discrepancies.append(discrepancy_row)
                         
                         # Check if user IS in JSON data but date doesn't match
                         elif login in user_dates:
                             user_json_dates = user_dates[login]
+                            user_json_ides = user_ides.get(login, set())
+                            
+                            # Check for IDE mismatch
+                            expected_ides = normalize_surface(surface)
+                            ide_matches = bool(expected_ides & user_json_ides)
+                            ide_mismatch = 'Yes' if user_json_ides and not ide_matches else ''
+                            if ide_mismatch:
+                                stats['ide_mismatch_count'] += 1
+                            
                             if last_activity_date not in user_json_dates:
                                 stats['date_mismatch_count'] += 1
                                 stats['date_mismatch_surface_breakdown'][surface] += 1
                                 
                                 # Create row with discrepancy info
                                 discrepancy_row = dict(row)
-                                discrepancy_row['Discrepancy Type'] = 'date_mismatch'
                                 discrepancy_row['JSON Activity Dates'] = ', '.join(sorted(user_json_dates))
                                 discrepancy_row['Latest JSON Date'] = max(user_json_dates) if user_json_dates else ''
+                                discrepancy_row['JSON IDEs'] = ', '.join(sorted(user_json_ides))
+                                discrepancy_row['IDE Mismatch'] = ide_mismatch
+                                all_discrepancies.append(discrepancy_row)
+                            elif ide_mismatch:
+                                # Date matches but IDE doesn't - still flag it
+                                discrepancy_row = dict(row)
+                                discrepancy_row['JSON Activity Dates'] = ', '.join(sorted(user_json_dates))
+                                discrepancy_row['Latest JSON Date'] = max(user_json_dates) if user_json_dates else ''
+                                discrepancy_row['JSON IDEs'] = ', '.join(sorted(user_json_ides))
+                                discrepancy_row['IDE Mismatch'] = ide_mismatch
                                 all_discrepancies.append(discrepancy_row)
                             
                 except ValueError:
                     continue
     
     # Output fieldnames include discrepancy columns
-    output_fieldnames = fieldnames + ['Discrepancy Type', 'JSON Activity Dates', 'Latest JSON Date']
+    output_fieldnames = fieldnames + ['JSON Activity Dates', 'Latest JSON Date', 'JSON IDEs', 'IDE Mismatch']
     
     return all_discrepancies, output_fieldnames, stats
 
@@ -285,6 +346,9 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("Breakdown by Surface Type:\n")
         for surface, count in sorted(stats['date_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
             f.write(f"  {surface}: {count:,}\n")
+        
+        f.write("\n--- IDE Mismatches ---\n")
+        f.write(f"Count: {stats['ide_mismatch_count']:,}\n")
     
     print(f"Wrote summary to {output_path}")
 
@@ -342,7 +406,7 @@ Examples:
     
     # Step 1: Parse JSON files
     print("Step 1: Parsing JSON files...")
-    rows, user_dates, report_start, report_end = parse_json_files(args.json_files)
+    rows, user_dates, user_ides, report_start, report_end = parse_json_files(args.json_files)
     
     if not rows:
         print("Error: No data extracted from JSON files.")
@@ -364,6 +428,7 @@ Examples:
     all_discrepancies, output_fieldnames, stats = find_discrepancies(
         rows,
         user_dates,
+        user_ides,
         args.activity_report, 
         report_start, 
         report_end
@@ -391,6 +456,7 @@ Examples:
     print("  Breakdown by surface:")
     for surface, count in sorted(stats['date_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
         print(f"    {surface}: {count:,}")
+    print(f"\n  IDE mismatches: {stats['ide_mismatch_count']:,}")
     print("\nOutput files:")
     print(f"  - {discrepancies_csv_path}")
     print(f"  - {summary_path}")
