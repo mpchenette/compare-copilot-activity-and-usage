@@ -22,6 +22,7 @@ Output Files:
 import json
 import csv
 import os
+import re
 import argparse
 from datetime import datetime
 from collections import defaultdict
@@ -47,16 +48,26 @@ SURFACE_TO_IDE_MAP = {
 }
 
 
-def normalize_surface(surface):
+# Pattern for VS Code Copilot extension versions (0.XX.X format)
+VSCODE_VERSION_PATTERN = re.compile(r'^0\.\d{1,2}\.\d+$')
+
+
+def normalize_surface(surface, version=None):
     """
     Normalize a surface name from activity report to comparable IDE names.
     
     Args:
         surface: Surface name from activity report (e.g., 'JetBrains-IU')
+        version: Optional version string (e.g., '0.33.3')
         
     Returns:
         Set of possible matching IDE names from JSON
     """
+    # Check if version matches VS Code Copilot extension pattern (0.XX.X)
+    # This handles cases where surface is 'unknown' but version indicates VS Code
+    if version and VSCODE_VERSION_PATTERN.match(version):
+        return {'vscode'}
+    
     surface_lower = surface.lower()
     return set(SURFACE_TO_IDE_MAP.get(surface_lower, [surface_lower]))
 
@@ -235,8 +246,20 @@ def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_pa
                     if report_start_dt <= last_activity_dt <= report_end_dt:
                         stats['users_active_in_window'] += 1
                         
-                        # Track surface type
-                        surface = last_surface.split('/')[0] if last_surface else 'unknown'
+                        # Track surface type and version
+                        # Format can be: "vscode/1.85.0" or "unknown/GitHubCopilotChat/0.33.3"
+                        if last_surface:
+                            parts = last_surface.split('/')
+                            surface = parts[0]
+                            # Look for version pattern in any part of the string
+                            version = None
+                            for part in parts[1:]:
+                                if VSCODE_VERSION_PATTERN.match(part):
+                                    version = part
+                                    break
+                        else:
+                            surface = 'unknown'
+                            version = None
                         
                         # Check if NOT in JSON data at all
                         if login not in distilled_users:
@@ -257,7 +280,7 @@ def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_pa
                             user_json_ides = user_ides.get(login, set())
                             
                             # Check for IDE mismatch
-                            expected_ides = normalize_surface(surface)
+                            expected_ides = normalize_surface(surface, version)
                             ide_matches = bool(expected_ides & user_json_ides)
                             ide_mismatch = 'Yes' if user_json_ides and not ide_matches else ''
                             if ide_mismatch:
