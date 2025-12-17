@@ -1,0 +1,9 @@
+# macOS
+.DS_Store
+
+# Data files (customer-specific, do not commit)
+*.json
+*.csv
+
+# Output directory
+analysis-output/
