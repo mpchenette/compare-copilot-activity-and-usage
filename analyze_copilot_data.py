@@ -24,52 +24,213 @@ import csv
 import os
 import re
 import argparse
-from datetime import datetime
+from datetime import datetime, timedelta
 from collections import defaultdict
 
 
-# Mapping from activity report surface names to JSON IDE names
-SURFACE_TO_IDE_MAP = {
-    'vscode': ['vscode'],
-    'jetbrains-iu': ['intellij'],
-    'jetbrains-py': ['pycharm'],
-    'jetbrains-cl': ['clion'],
-    'jetbrains-go': ['goland'],
-    'jetbrains-rm': ['rubymine'],
-    'jetbrains-ws': ['webstorm'],
-    'jetbrains-rd': ['rider'],
-    'jetbrains-ps': ['phpstorm'],
-    'jetbrains-db': ['datagrip'],
-    'visualstudio': ['visualstudio'],
-    'neovim': ['neovim'],
-    'vim': ['vim'],
-    'emacs': ['emacs'],
-    'xcode': ['xcode'],
+# Mapping from activity report surface/IDE names to JSON IDE names
+# Note: JSON export reports ALL JetBrains IDEs as 'intellij'
+SURFACE_TO_JSON_IDE = {
+    'vscode': 'vscode',
+    'vscode-chat': 'vscode',
+    'jetbrains-iu': 'intellij',
+    'jetbrains-py': 'intellij',  # PyCharm reports as intellij
+    'jetbrains-cl': 'intellij',  # CLion reports as intellij
+    'jetbrains-go': 'intellij',  # GoLand reports as intellij
+    'jetbrains-rm': 'intellij',  # RubyMine reports as intellij
+    'jetbrains-ws': 'intellij',  # WebStorm reports as intellij
+    'jetbrains-rd': 'intellij',  # Rider reports as intellij
+    'jetbrains-ps': 'intellij',  # PhpStorm reports as intellij
+    'jetbrains-db': 'intellij',  # DataGrip reports as intellij
+    'jetbrains-jbc': 'intellij', # JetBrains Client reports as intellij
+    'jetbrains-ai': 'intellij',  # JetBrains AI Assistant reports as intellij
+    'jetbrains-pc': 'intellij',  # PyCharm Community reports as intellij
+    'visualstudio': 'visualstudio',
+    'neovim': 'neovim',
+    'vim': 'vim',
+    'emacs': 'emacs',
+    'xcode': 'xcode',
+    'unknown': 'unknown',
 }
 
+# Mapping for plugin names (activity report -> JSON)
+# Empty - keep plugin names as-is since copilot-chat and copilot are different extensions
+PLUGIN_NAME_MAP = {}
 
 # Pattern for VS Code Copilot extension versions (0.XX.X format)
 VSCODE_VERSION_PATTERN = re.compile(r'^0\.\d{1,2}\.\d+$')
 
 
-def normalize_surface(surface, version=None):
+def normalize_timestamp(ts):
     """
-    Normalize a surface name from activity report to comparable IDE names.
+    Normalize a timestamp by removing milliseconds for comparison.
     
     Args:
-        surface: Surface name from activity report (e.g., 'JetBrains-IU')
-        version: Optional version string (e.g., '0.33.3')
+        ts: ISO timestamp string (e.g., '2025-12-13T11:35:21.5230000Z')
         
     Returns:
-        Set of possible matching IDE names from JSON
+        Normalized timestamp without milliseconds (e.g., '2025-12-13T11:35:21Z')
     """
-    # Check if version matches VS Code Copilot extension pattern (0.XX.X)
-    # This handles cases where surface is 'unknown' but version indicates VS Code
-    if version and VSCODE_VERSION_PATTERN.match(version):
-        return {'vscode'}
+    if not ts:
+        return None
+    # Remove milliseconds (.XXXXXXX) if present
+    if '.' in ts:
+        return ts.split('.')[0] + 'Z'
+    return ts
+
+
+def find_closest_timestamp(report_ts, json_timestamps, tolerance_hours=1):
+    """
+    Find the closest JSON timestamp to the report timestamp.
     
-    surface_lower = surface.lower()
-    return set(SURFACE_TO_IDE_MAP.get(surface_lower, [surface_lower]))
+    Args:
+        report_ts: Normalized timestamp from activity report (e.g., '2025-12-13T11:35:21Z')
+        json_timestamps: Set of normalized timestamps from JSON
+        tolerance_hours: Maximum hours difference to consider a match (default 1)
+        
+    Returns:
+        Tuple of (closest_timestamp, is_within_tolerance, time_diff_seconds)
+        - closest_timestamp: The closest JSON timestamp, or None if no timestamps
+        - is_within_tolerance: True if within tolerance_hours
+        - time_diff_seconds: Absolute difference in seconds (positive = JSON is later)
+    """
+    if not report_ts or not json_timestamps:
+        return None, False, None
+    
+    try:
+        # Parse report timestamp
+        report_dt = datetime.strptime(report_ts.rstrip('Z'), '%Y-%m-%dT%H:%M:%S')
+        
+        closest_ts = None
+        min_diff = None
+        
+        for json_ts in json_timestamps:
+            try:
+                json_dt = datetime.strptime(json_ts.rstrip('Z'), '%Y-%m-%dT%H:%M:%S')
+                diff = abs((json_dt - report_dt).total_seconds())
+                
+                if min_diff is None or diff < min_diff:
+                    min_diff = diff
+                    closest_ts = json_ts
+            except ValueError:
+                continue
+        
+        if closest_ts is None:
+            return None, False, None
+        
+        tolerance_seconds = tolerance_hours * 3600
+        is_within_tolerance = min_diff <= tolerance_seconds
+        
+        return closest_ts, is_within_tolerance, min_diff
+        
+    except ValueError:
+        return None, False, None
+
+
+def normalize_surface_to_json_format(last_surface):
+    """
+    Convert an activity report surface string to the JSON format for comparison.
+    
+    Activity report format: surface/ide_version/plugin/plugin_version
+    JSON format: ide/ide_version/plugin/plugin_version
+    
+    Args:
+        last_surface: Full surface string from activity report 
+                      (e.g., 'JetBrains-IU/252.25557.131/copilot-intellij/1.5.57-243')
+        
+    Returns:
+        Normalized string in JSON format, or None if can't be normalized
+    """
+    if not last_surface:
+        return None
+    
+    parts = last_surface.split('/')
+    if not parts:
+        return None
+    
+    surface = parts[0].lower()
+    
+    # Check if any part matches VS Code extension version pattern (0.XX.X)
+    # This indicates VS Code even if surface says 'unknown'
+    for part in parts[1:]:
+        if VSCODE_VERSION_PATTERN.match(part):
+            surface = 'vscode'
+            break
+    
+    # Map surface name to JSON IDE name
+    json_ide = SURFACE_TO_JSON_IDE.get(surface, surface)
+    
+    # Build normalized string
+    normalized_parts = [json_ide]
+    
+    # Add remaining parts (ide_version, plugin, plugin_version)
+    for i, part in enumerate(parts[1:], 1):
+        # Skip 'GitHubCopilotChat' or similar intermediate identifiers
+        if part.lower() in ('githubcopilotchat', 'githubcopilot'):
+            continue
+        # Map plugin names if this looks like a plugin name
+        if part.lower() in PLUGIN_NAME_MAP:
+            normalized_parts.append(PLUGIN_NAME_MAP[part.lower()])
+        else:
+            normalized_parts.append(part)
+    
+    return '/'.join(normalized_parts)
+
+
+def ide_matches_partial(report_surface, json_ide):
+    """
+    Check if two IDE strings match, allowing for partial matches.
+    
+    A partial match means the IDE name and version match, even if one
+    has additional plugin info that the other lacks.
+    
+    Examples that should match:
+        - 'JetBrains-IU/233.15026.9/' and 'intellij/233.15026.9/copilot-intellij/1.5.8.5775'
+        - 'vscode/1.105.1/' and 'vscode/1.105.1/copilot/1.387.0'
+    
+    Args:
+        report_surface: Surface string from activity report
+        json_ide: IDE string from JSON export
+        
+    Returns:
+        True if IDE name and version match (partial match allowed)
+    """
+    if not report_surface or not json_ide:
+        return False
+    
+    # Parse both into parts
+    report_parts = report_surface.lower().split('/')
+    json_parts = json_ide.lower().split('/')
+    
+    if len(report_parts) < 1 or len(json_parts) < 1:
+        return False
+    
+    # Get IDE names
+    report_ide = report_parts[0]
+    json_ide_name = json_parts[0]
+    
+    # Normalize report IDE name to JSON format
+    report_ide_normalized = SURFACE_TO_JSON_IDE.get(report_ide, report_ide)
+    
+    # Check if IDE names match
+    if report_ide_normalized != json_ide_name:
+        return False
+    
+    # Get versions (second part if available)
+    report_version = report_parts[1] if len(report_parts) > 1 else ''
+    json_version = json_parts[1] if len(json_parts) > 1 else ''
+    
+    # Strip trailing empty parts
+    report_version = report_version.strip()
+    json_version = json_version.strip()
+    
+    # If both have versions, they must match
+    if report_version and json_version:
+        return report_version == json_version
+    
+    # If only one has a version, still consider it a match (partial)
+    # This handles cases where one source has more detail than the other
+    return True
 
 
 def parse_json_files(json_files):
@@ -80,13 +241,13 @@ def parse_json_files(json_files):
         json_files: List of paths to JSON files
         
     Returns:
-        Tuple of (list of row dicts, user_dates dict, user_ides dict, report_start_day, report_end_day)
-        user_dates maps user_login -> set of activity dates (YYYY-MM-DD)
-        user_ides maps user_login -> set of IDE names
+        Tuple of (list of row dicts, user_timestamps dict, report_start_day, report_end_day)
+        user_timestamps maps user_login -> dict with:
+            'timestamps': set of normalized timestamps
+            'timestamp_to_ide': dict mapping timestamp -> IDE string
     """
     rows = []
-    user_dates = defaultdict(set)  # Track all activity dates per user
-    user_ides = defaultdict(set)   # Track all IDEs per user
+    user_timestamps = defaultdict(lambda: {'timestamps': set(), 'timestamp_to_ide': {}})
     report_start = None
     report_end = None
     
@@ -133,10 +294,6 @@ def parse_json_files(json_files):
                         report_start = record_report_start
                         report_end = record_report_end
                     
-                    # Track activity dates per user
-                    if user_login and day:
-                        user_dates[user_login].add(day)
-                    
                     # Extract IDE info from totals_by_ide array
                     totals_by_ide = record.get('totals_by_ide', [])
                     
@@ -144,18 +301,34 @@ def parse_json_files(json_files):
                         for ide_info in totals_by_ide:
                             ide = ide_info.get('ide', '')
                             
-                            # Track IDEs per user
-                            if user_login and ide:
-                                user_ides[user_login].add(ide.lower())
-                            
-                            # Get IDE version
+                            # Get IDE version and sampled_at timestamp
                             last_known_ide_version = ide_info.get('last_known_ide_version', {})
                             ide_version = last_known_ide_version.get('ide_version', '')
+                            sampled_at = last_known_ide_version.get('sampled_at', '')
                             
                             # Get plugin info
                             last_known_plugin_version = ide_info.get('last_known_plugin_version', {})
                             plugin = last_known_plugin_version.get('plugin', '')
                             plugin_version = last_known_plugin_version.get('plugin_version', '')
+                            plugin_sampled_at = last_known_plugin_version.get('sampled_at', '')
+                            
+                            # Build IDE string matching activity report format
+                            if user_login and ide:
+                                parts = [ide.lower()]
+                                if ide_version:
+                                    parts.append(ide_version)
+                                if plugin:
+                                    parts.append(plugin)
+                                if plugin_version:
+                                    parts.append(plugin_version)
+                                ide_str = '/'.join(parts)
+                                
+                                # Track timestamps and map to IDE strings
+                                # Use plugin sampled_at if available, otherwise IDE sampled_at
+                                ts = normalize_timestamp(plugin_sampled_at or sampled_at)
+                                if ts:
+                                    user_timestamps[user_login]['timestamps'].add(ts)
+                                    user_timestamps[user_login]['timestamp_to_ide'][ts] = ide_str
                             
                             rows.append({
                                 'report_start_day': record_report_start,
@@ -184,18 +357,17 @@ def parse_json_files(json_files):
                     print(f"  Warning: Error parsing JSON in {filepath}: {e}")
                     continue
     
-    return rows, user_dates, user_ides, report_start, report_end
+    return rows, user_timestamps, report_start, report_end
 
 
-def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_path, report_start, report_end):
+def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, report_start, report_end):
     """
     Find users who are active in the activity report within the report window
     but have discrepancies with the JSON usage data.
     
     Args:
         distilled_rows: List of row dicts from distilled data
-        user_dates: Dict mapping user_login -> set of activity dates from JSON
-        user_ides: Dict mapping user_login -> set of IDE names from JSON
+        user_timestamps: Dict mapping user_login -> dict with timestamps and IDE info
         activity_report_path: Path to activity report CSV
         report_start: Report start date (YYYY-MM-DD)
         report_end: Report end date (YYYY-MM-DD)
@@ -212,21 +384,19 @@ def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_pa
     
     # Find discrepancies
     all_discrepancies = []
-    fieldnames = None
     stats = {
         'total_activity_users': 0,
         'users_with_activity': 0,
         'users_active_in_window': 0,
         'missing_count': 0,
-        'date_mismatch_count': 0,
+        'timestamp_mismatch_count': 0,
         'ide_mismatch_count': 0,
         'missing_surface_breakdown': defaultdict(int),
-        'date_mismatch_surface_breakdown': defaultdict(int)
+        'timestamp_mismatch_surface_breakdown': defaultdict(int)
     }
     
     with open(activity_report_path, 'r') as f:
         reader = csv.DictReader(f)
-        fieldnames = list(reader.fieldnames)  # Preserve original column names
         
         for row in reader:
             stats['total_activity_users'] += 1
@@ -246,71 +416,102 @@ def find_discrepancies(distilled_rows, user_dates, user_ides, activity_report_pa
                     if report_start_dt <= last_activity_dt <= report_end_dt:
                         stats['users_active_in_window'] += 1
                         
-                        # Track surface type and version
-                        # Format can be: "vscode/1.85.0" or "unknown/GitHubCopilotChat/0.33.3"
+                        # Track surface type
                         if last_surface:
                             parts = last_surface.split('/')
                             surface = parts[0]
-                            # Look for version pattern in any part of the string
-                            version = None
-                            for part in parts[1:]:
-                                if VSCODE_VERSION_PATTERN.match(part):
-                                    version = part
-                                    break
                         else:
                             surface = 'unknown'
-                            version = None
+                        
+                        # Skip Neovim users - they are not expected to appear in JSON
+                        if surface.lower() == 'neovim':
+                            continue
+                        
+                        # Normalize activity report surface and timestamp for comparison
+                        normalized_surface = normalize_surface_to_json_format(last_surface)
+                        normalized_report_ts = normalize_timestamp(last_activity_at)
                         
                         # Check if NOT in JSON data at all
                         if login not in distilled_users:
                             stats['missing_count'] += 1
                             stats['missing_surface_breakdown'][surface] += 1
                             
-                            # Create row with discrepancy info
-                            discrepancy_row = dict(row)
-                            discrepancy_row['JSON Activity Dates'] = ''
-                            discrepancy_row['Latest JSON Date'] = ''
-                            discrepancy_row['JSON IDEs'] = ''
-                            discrepancy_row['IDE Mismatch'] = ''
+                            discrepancy_row = {
+                                'Login': login,
+                                'Status': 'Missing from JSON',
+                                'Last Activity At': last_activity_at,
+                                'Latest Export Activity': '',
+                                'Report Surface': last_surface,
+                                'JSON IDE': '',
+                                'Report Generated': row.get('Report Time', '')
+                            }
                             all_discrepancies.append(discrepancy_row)
                         
-                        # Check if user IS in JSON data but date doesn't match
-                        elif login in user_dates:
-                            user_json_dates = user_dates[login]
-                            user_json_ides = user_ides.get(login, set())
+                        # User is in JSON - check timestamp match
+                        elif login in user_timestamps:
+                            user_data = user_timestamps[login]
+                            json_timestamps = user_data['timestamps']
+                            timestamp_to_ide = user_data['timestamp_to_ide']
                             
-                            # Check for IDE mismatch
-                            expected_ides = normalize_surface(surface, version)
-                            ide_matches = bool(expected_ides & user_json_ides)
-                            ide_mismatch = 'Yes' if user_json_ides and not ide_matches else ''
-                            if ide_mismatch:
-                                stats['ide_mismatch_count'] += 1
+                            # Get most recent JSON timestamp for display
+                            most_recent_json_ts = max(json_timestamps) if json_timestamps else ''
                             
-                            if last_activity_date not in user_json_dates:
-                                stats['date_mismatch_count'] += 1
-                                stats['date_mismatch_surface_breakdown'][surface] += 1
+                            # Find closest timestamp and check if within 1 day tolerance
+                            closest_ts, within_tolerance, time_diff = find_closest_timestamp(
+                                normalized_report_ts, json_timestamps, tolerance_hours=24
+                            )
+                            
+                            # Check for exact timestamp match (for IDE comparison)
+                            exact_match = normalized_report_ts in json_timestamps
+                            
+                            if not within_tolerance:
+                                # No timestamp within 1 hour - flag as mismatch
+                                stats['timestamp_mismatch_count'] += 1
+                                stats['timestamp_mismatch_surface_breakdown'][surface] += 1
                                 
-                                # Create row with discrepancy info
-                                discrepancy_row = dict(row)
-                                discrepancy_row['JSON Activity Dates'] = ', '.join(sorted(user_json_dates))
-                                discrepancy_row['Latest JSON Date'] = max(user_json_dates) if user_json_dates else ''
-                                discrepancy_row['JSON IDEs'] = ', '.join(sorted(user_json_ides))
-                                discrepancy_row['IDE Mismatch'] = ide_mismatch
+                                discrepancy_row = {
+                                    'Login': login,
+                                    'Status': 'Timestamp Mismatch',
+                                    'Last Activity At': last_activity_at,
+                                    'Latest Export Activity': most_recent_json_ts,
+                                    'Report Surface': last_surface,
+                                    'JSON IDE': '',
+                                    'Report Generated': row.get('Report Time', '')
+                                }
                                 all_discrepancies.append(discrepancy_row)
-                            elif ide_mismatch:
-                                # Date matches but IDE doesn't - still flag it
-                                discrepancy_row = dict(row)
-                                discrepancy_row['JSON Activity Dates'] = ', '.join(sorted(user_json_dates))
-                                discrepancy_row['Latest JSON Date'] = max(user_json_dates) if user_json_dates else ''
-                                discrepancy_row['JSON IDEs'] = ', '.join(sorted(user_json_ides))
-                                discrepancy_row['IDE Mismatch'] = ide_mismatch
-                                all_discrepancies.append(discrepancy_row)
+                            elif exact_match:
+                                # Exact timestamp match - check IDE
+                                json_ide = timestamp_to_ide.get(normalized_report_ts, '')
+                                ide_matches = ide_matches_partial(last_surface, json_ide)
+                                
+                                if not ide_matches:
+                                    stats['ide_mismatch_count'] += 1
+                                    
+                                    discrepancy_row = {
+                                        'Login': login,
+                                        'Status': 'IDE Mismatch',
+                                        'Last Activity At': last_activity_at,
+                                        'Latest Export Activity': most_recent_json_ts,
+                                        'Report Surface': last_surface,
+                                        'JSON IDE': json_ide,
+                                        'Report Generated': row.get('Report Time', '')
+                                    }
+                                    all_discrepancies.append(discrepancy_row)
+                            # else: within tolerance but not exact - no discrepancy
                             
                 except ValueError:
                     continue
     
-    # Output fieldnames include discrepancy columns
-    output_fieldnames = fieldnames + ['JSON Activity Dates', 'Latest JSON Date', 'JSON IDEs', 'IDE Mismatch']
+    # Define structured output columns
+    output_fieldnames = [
+        'Login',
+        'Status',
+        'Last Activity At',
+        'Latest Export Activity',
+        'Report Surface',
+        'JSON IDE',
+        'Report Generated'
+    ]
     
     return all_discrepancies, output_fieldnames, stats
 
@@ -364,13 +565,13 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         for surface, count in sorted(stats['missing_surface_breakdown'].items(), key=lambda x: -x[1]):
             f.write(f"  {surface}: {count:,}\n")
         
-        f.write("\n--- Date Mismatches (in both but dates don't match) ---\n")
-        f.write(f"Count: {stats['date_mismatch_count']:,}\n")
+        f.write("\n--- Timestamp Mismatches (user in JSON but timestamp not found) ---\n")
+        f.write(f"Count: {stats['timestamp_mismatch_count']:,}\n")
         f.write("Breakdown by Surface Type:\n")
-        for surface, count in sorted(stats['date_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
+        for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
             f.write(f"  {surface}: {count:,}\n")
         
-        f.write("\n--- IDE Mismatches ---\n")
+        f.write("\n--- IDE Mismatches (timestamp matches but IDE differs) ---\n")
         f.write(f"Count: {stats['ide_mismatch_count']:,}\n")
     
     print(f"Wrote summary to {output_path}")
@@ -429,7 +630,7 @@ Examples:
     
     # Step 1: Parse JSON files
     print("Step 1: Parsing JSON files...")
-    rows, user_dates, user_ides, report_start, report_end = parse_json_files(args.json_files)
+    rows, user_timestamps, report_start, report_end = parse_json_files(args.json_files)
     
     if not rows:
         print("Error: No data extracted from JSON files.")
@@ -450,8 +651,7 @@ Examples:
     print("\nStep 2: Finding discrepancies with activity report...")
     all_discrepancies, output_fieldnames, stats = find_discrepancies(
         rows,
-        user_dates,
-        user_ides,
+        user_timestamps,
         args.activity_report, 
         report_start, 
         report_end
@@ -470,16 +670,22 @@ Examples:
     print(f"Unique users in JSON data: {len(distilled_users):,}")
     print(f"Total users in activity report: {stats['total_activity_users']:,}")
     print(f"Users active within report window: {stats['users_active_in_window']:,}")
-    print(f"\nTotal discrepancies: {stats['missing_count'] + stats['date_mismatch_count']:,}")
+    
+    total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
+    print(f"\nTotal discrepancies: {total_discrepancies:,}")
+    
     print(f"\n  Missing users (in activity report but NOT in JSON): {stats['missing_count']:,}")
     print("  Breakdown by surface:")
     for surface, count in sorted(stats['missing_surface_breakdown'].items(), key=lambda x: -x[1]):
         print(f"    {surface}: {count:,}")
-    print(f"\n  Date mismatches (in both but dates don't align): {stats['date_mismatch_count']:,}")
+    
+    print(f"\n  Timestamp mismatches (user in JSON but timestamp not found): {stats['timestamp_mismatch_count']:,}")
     print("  Breakdown by surface:")
-    for surface, count in sorted(stats['date_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
+    for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
         print(f"    {surface}: {count:,}")
-    print(f"\n  IDE mismatches: {stats['ide_mismatch_count']:,}")
+    
+    print(f"\n  IDE mismatches (timestamp matches but IDE differs): {stats['ide_mismatch_count']:,}")
+    
     print("\nOutput files:")
     print(f"  - {discrepancies_csv_path}")
     print(f"  - {summary_path}")
