@@ -73,6 +73,130 @@ PLUGIN_NAME_MAP = {}
 # Pattern for VS Code Copilot extension versions (0.XX.X format)
 VSCODE_VERSION_PATTERN = re.compile(r'^0\.\d{1,2}\.\d+$')
 
+# Minimum supported versions for Copilot usage metrics
+# Users on older versions will NOT appear in the JSON export by design
+# Source: https://docs.github.com/en/enterprise-cloud@latest/copilot/rolling-out-github-copilot-at-scale/analyzing-usage-over-time-with-the-copilot-metrics-api
+MIN_VERSIONS = {
+    'vscode': {
+        'ide': (1, 101),           # VS Code 1.101
+        'extension': (0, 28, 0),    # copilot-chat 0.28.0
+    },
+    'visualstudio': {
+        'ide': (17, 14, 13),        # Visual Studio 17.14.13
+        'extension': (18, 0, 471),  # 18.0.471.29466
+    },
+    'jetbrains': {
+        'ide': (2024, 2, 6),        # JetBrains 2024.2.6
+        'extension': (1, 5, 52),    # 1.5.52-241
+    },
+    'eclipse': {
+        'ide': (4, 31),             # Eclipse 4.31
+        'extension': (0, 9, 3),     # 0.9.3.202507240902
+    },
+    'xcode': {
+        'ide': (13, 2, 1),          # Xcode 13.2.1
+        'extension': (0, 40, 0),    # 0.40.0
+    },
+}
+
+
+def parse_version(version_str):
+    """
+    Parse a version string into a tuple of integers for comparison.
+    
+    Args:
+        version_str: Version string like '1.101.2' or '2024.2.6'
+        
+    Returns:
+        Tuple of integers, e.g., (1, 101, 2), or None if parsing fails
+    """
+    if not version_str:
+        return None
+    # Extract numeric parts only
+    match = re.match(r'^(\d+)(?:\.(\d+))?(?:\.(\d+))?', version_str)
+    if not match:
+        return None
+    parts = [int(p) for p in match.groups() if p is not None]
+    return tuple(parts) if parts else None
+
+
+def is_version_supported(surface_str):
+    """
+    Check if the IDE/extension version from the activity report meets minimum requirements.
+    
+    Args:
+        surface_str: Surface string from activity report, e.g., 
+                     'vscode/1.104.3/copilot-chat/0.31.5'
+                     'JetBrains-IU/243.22562.145/copilot-intellij/1.5.32.8521'
+        
+    Returns:
+        Tuple of (is_supported, reason)
+        - is_supported: True if version meets minimum requirements
+        - reason: String explaining why not supported, or None if supported
+    """
+    if not surface_str:
+        return False, "No surface info"
+    
+    parts = surface_str.split('/')
+    if len(parts) < 2:
+        return False, "Invalid surface format"
+    
+    ide_name = parts[0].lower()
+    ide_version_str = parts[1] if len(parts) > 1 else ''
+    
+    # Get extension info if available
+    ext_name = parts[2] if len(parts) > 2 else ''
+    ext_version_str = parts[3] if len(parts) > 3 else ''
+    
+    # Determine which minimum version set to use
+    if ide_name in ['vscode', 'vscode-chat']:
+        min_ver = MIN_VERSIONS.get('vscode')
+        ide_type = 'vscode'
+    elif ide_name.startswith('jetbrains-') or ide_name in ['eclipse ide', 'eclipse']:
+        min_ver = MIN_VERSIONS.get('jetbrains')
+        ide_type = 'jetbrains'
+    elif ide_name in ['visualstudio', 'vs']:
+        min_ver = MIN_VERSIONS.get('visualstudio')
+        ide_type = 'visualstudio'
+    elif ide_name == 'xcode':
+        min_ver = MIN_VERSIONS.get('xcode')
+        ide_type = 'xcode'
+    else:
+        # Unknown IDE - can't validate, assume supported
+        return True, None
+    
+    if not min_ver:
+        return True, None
+    
+    # Parse IDE version
+    ide_version = parse_version(ide_version_str)
+    if not ide_version:
+        return False, f"Cannot parse IDE version: {ide_version_str}"
+    
+    # Check IDE version
+    min_ide = min_ver.get('ide')
+    if min_ide:
+        # Pad versions to same length for comparison
+        ide_padded = ide_version + (0,) * (len(min_ide) - len(ide_version))
+        min_padded = min_ide + (0,) * (len(ide_version) - len(min_ide))
+        
+        if ide_padded[:len(min_ide)] < min_ide:
+            return False, f"IDE version {ide_version_str} < minimum {'.'.join(map(str, min_ide))}"
+    
+    # Check extension version if available
+    if ext_version_str:
+        ext_version = parse_version(ext_version_str)
+        min_ext = min_ver.get('extension')
+        
+        if ext_version and min_ext:
+            ext_padded = ext_version + (0,) * (len(min_ext) - len(ext_version))
+            min_ext_padded = min_ext + (0,) * (len(ext_version) - len(min_ext))
+            
+            if ext_padded[:len(min_ext)] < min_ext:
+                return False, f"Extension version {ext_version_str} < minimum {'.'.join(map(str, min_ext))}"
+    
+    return True, None
+
 
 def normalize_timestamp(ts):
     """
@@ -401,12 +525,14 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'total_activity_users': 0,
         'users_with_activity': 0,
         'users_active_in_window': 0,
+        'users_unsupported_version': 0,
         'missing_count': 0,
         'timestamp_mismatch_count': 0,
         'ide_mismatch_count': 0,
         'missing_surface_breakdown': defaultdict(int),
         'timestamp_mismatch_surface_breakdown': defaultdict(int),
-        'ide_mismatch_surface_breakdown': defaultdict(int)
+        'ide_mismatch_surface_breakdown': defaultdict(int),
+        'unsupported_version_breakdown': defaultdict(int)
     }
     
     with open(activity_report_path, 'r') as f:
@@ -439,6 +565,14 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         
                         # Skip Neovim users - they are not expected to appear in JSON
                         if surface.lower() == 'neovim':
+                            continue
+                        
+                        # Skip users on unsupported IDE/extension versions
+                        # These users will NOT appear in JSON export by design
+                        is_supported, unsupported_reason = is_version_supported(last_surface)
+                        if not is_supported:
+                            stats['users_unsupported_version'] += 1
+                            stats['unsupported_version_breakdown'][surface] += 1
                             continue
                         
                         # Normalize activity report surface and timestamp for comparison
@@ -704,7 +838,18 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("--- Activity Report ---\n")
         f.write(f"Total users in activity report: {stats['total_activity_users']:,}\n")
         f.write(f"Users with activity data: {stats['users_with_activity']:,}\n")
-        f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
+        f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n")
+        f.write(f"Users on unsupported versions (excluded): {stats['users_unsupported_version']:,}\n\n")
+        
+        # Show unsupported version breakdown if any
+        if stats['users_unsupported_version'] > 0:
+            f.write("--- Users on Unsupported Versions (excluded from analysis) ---\n")
+            f.write(f"Count: {stats['users_unsupported_version']:,}\n")
+            f.write("These users are expected to be missing from JSON export.\n")
+            f.write("Breakdown by Surface Type:\n")
+            for surface, count in sorted(stats['unsupported_version_breakdown'].items(), key=lambda x: -x[1]):
+                f.write(f"  {surface}: {count:,}\n")
+            f.write("\n")
         
         # Calculate total discrepancies and affected user percentage
         # Use total users with activity (not just window) since 72-hour buffer excludes recent active users
@@ -926,6 +1071,7 @@ Examples:
     print(f"Unique users in JSON data: {len(distilled_users):,}")
     print(f"Total users in activity report: {stats['total_activity_users']:,}")
     print(f"Users active within report window: {stats['users_active_in_window']:,}")
+    print(f"Users on unsupported versions (excluded): {stats['users_unsupported_version']:,}")
     
     total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
     print(f"\nTotal discrepancies: {total_discrepancies:,}")
