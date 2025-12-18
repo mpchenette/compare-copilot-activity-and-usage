@@ -4,6 +4,7 @@
 # Data files (customer-specific, do not commit)
 *.json
 *.csv
+*.txt
 
 # Output directory
 analysis-output/
