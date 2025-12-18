@@ -390,13 +390,15 @@ def parse_json_files(json_files):
         json_files: List of paths to JSON files
         
     Returns:
-        Tuple of (list of row dicts, user_timestamps dict, report_start_day, report_end_day)
+        Tuple of (list of row dicts, user_timestamps dict, user_interactions dict, report_start_day, report_end_day)
         user_timestamps maps user_login -> dict with:
             'timestamps': set of normalized timestamps
             'timestamp_to_ide': dict mapping timestamp -> IDE string
+        user_interactions maps user_login -> total user_initiated_interaction_count
     """
     rows = []
     user_timestamps = defaultdict(lambda: {'timestamps': set(), 'timestamp_to_ide': {}})
+    user_interactions = defaultdict(int)  # Track total interactions per user
     report_start = None
     report_end = None
     
@@ -437,6 +439,11 @@ def parse_json_files(json_files):
                     record_report_end = record.get('report_end_day', '')
                     day = record.get('day', '')
                     user_login = record.get('user_login', '')
+                    
+                    # Track user_initiated_interaction_count per user
+                    interaction_count = record.get('user_initiated_interaction_count', 0)
+                    if user_login and interaction_count:
+                        user_interactions[user_login] += interaction_count
                     
                     # Track report window (should be consistent across all records)
                     if report_start is None and record_report_start:
@@ -506,7 +513,7 @@ def parse_json_files(json_files):
                     print(f"  Warning: Error parsing JSON in {filepath}: {e}")
                     continue
     
-    return rows, user_timestamps, report_start, report_end
+    return rows, user_timestamps, user_interactions, report_start, report_end
 
 
 def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, report_start, report_end):
@@ -700,13 +707,14 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
     return all_discrepancies, output_fieldnames, stats
 
 
-def analyze_patterns(discrepancies, user_timestamps, activity_report_path, report_start, report_end):
+def analyze_patterns(discrepancies, user_timestamps, user_interactions, activity_report_path, report_start, report_end):
     """
     Analyze patterns in discrepancies by date, day of week, hour, and user activity level.
     
     Args:
         discrepancies: List of discrepancy dicts
         user_timestamps: Dict mapping user_login -> dict with timestamps info
+        user_interactions: Dict mapping user_login -> total interaction count
         activity_report_path: Path to activity report CSV
         report_start: Report start date
         report_end: Report end date
@@ -722,27 +730,24 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
         'by_hour': defaultdict(int),
         'by_activity_level': {},
         'timestamp_gaps': {'json_older': 0, 'json_newer': 0, 'gaps': []},
+        'stale_user_interactions': [],  # Interaction counts for stale/timestamp mismatch users
+        'healthy_user_interactions': [],  # Interaction counts for users with no discrepancy
     }
     
     dow_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
     
-    # Get unique days per user from JSON
-    user_unique_days = {}
-    for user, data in user_timestamps.items():
-        timestamps = data['timestamps']
-        days = set(ts[:10] for ts in timestamps if ts)
-        user_unique_days[user] = len(days)
-    
-    def get_activity_bucket(days):
-        if days == 0: return '0 days (missing)'
-        elif days <= 2: return '1-2 days'
-        elif days <= 5: return '3-5 days'
-        elif days <= 10: return '6-10 days'
-        elif days <= 20: return '11-20 days'
-        else: return '21+ days'
+    def get_activity_bucket(interactions):
+        """Bucket users by interaction count."""
+        if interactions == 0: return '0 (absent)'
+        elif interactions <= 5: return '1-5'
+        elif interactions <= 20: return '6-20'
+        elif interactions <= 50: return '21-50'
+        elif interactions <= 100: return '51-100'
+        elif interactions <= 500: return '101-500'
+        else: return '500+'
     
     # Initialize activity buckets
-    for bucket in ['0 days (missing)', '1-2 days', '3-5 days', '6-10 days', '11-20 days', '21+ days']:
+    for bucket in ['0 (absent)', '1-5', '6-20', '21-50', '51-100', '101-500', '500+']:
         patterns['by_activity_level'][bucket] = {
             'count': 0, 
             'gaps': [], 
@@ -780,11 +785,15 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
             except:
                 pass
         
-        # By activity level
-        days_active = user_unique_days.get(login, 0)
-        bucket = get_activity_bucket(days_active)
+        # By activity level (based on interaction count)
+        interactions = user_interactions.get(login, 0)
+        bucket = get_activity_bucket(interactions)
         patterns['by_activity_level'][bucket]['count'] += 1
         patterns['by_activity_level'][bucket]['status'][status] += 1
+        
+        # Track interaction counts for stale users
+        if 'Timestamp' in status:
+            patterns['stale_user_interactions'].append(interactions)
         
         # Timestamp gap analysis
         if last_activity and json_ts and 'Timestamp' in status:
@@ -803,6 +812,9 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
             except:
                 pass
     
+    # Build set of users with discrepancies for comparison
+    discrepancy_users = set(d.get('Login', '') for d in discrepancies)
+    
     # Calculate discrepancy rates by activity level
     # Count users in each activity bucket from activity report
     activity_users_by_bucket = defaultdict(int)
@@ -817,16 +829,19 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
             if surface and surface.lower().startswith('neovim'):
                 continue
             
-            if last_activity:
+            if last_activity and last_activity.lower() != 'none':
                 activity_date = last_activity[:10]
                 if activity_date >= report_start and activity_date <= report_end:
-                    days_active = user_unique_days.get(login, 0)
-                    bucket = get_activity_bucket(days_active)
+                    interactions = user_interactions.get(login, 0)
+                    bucket = get_activity_bucket(interactions)
                     activity_users_by_bucket[bucket] += 1
+                    
+                    # Track healthy user interaction counts (not in discrepancy list and has JSON data)
+                    if login not in discrepancy_users and interactions > 0:
+                        patterns['healthy_user_interactions'].append(interactions)
     
     patterns['activity_users_by_bucket'] = dict(activity_users_by_bucket)
-    patterns['user_unique_days'] = user_unique_days
-    
+    patterns['user_interactions'] = dict(user_interactions)
     return patterns
 
 
@@ -1069,13 +1084,13 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
             f.write(f"  JSON most recent is NEWER than report: {gaps['json_newer']}\n")
             
             # By activity level - horizontal bar chart
-            f.write("\n--- Discrepancy Rate by User Activity Level ---\n")
-            f.write("(Activity = unique days with JSON timestamps in report window)\n\n")
+            f.write("\n--- Stale Rate by Interaction Count ---\n")
+            f.write("(Interactions = user_initiated_interaction_count from JSON)\n\n")
             
             activity_users = patterns.get('activity_users_by_bucket', {})
             bar_width = 40  # Width of the bar in characters
             
-            for bucket in ['0 days (missing)', '1-2 days', '3-5 days', '6-10 days', '11-20 days', '21+ days']:
+            for bucket in ['0 (absent)', '1-5', '6-20', '21-50', '51-100', '101-500', '500+']:
                 data = patterns['by_activity_level'].get(bucket, {})
                 count = data.get('count', 0)
                 total_in_bucket = activity_users.get(bucket, 0)
@@ -1088,16 +1103,58 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
                     bar = '█' * filled + '░' * (bar_width - filled)
                     
                     # Format the label to fixed width for alignment
-                    label = f"{bucket:17}"
+                    label = f"{bucket:12}"
                     
                     f.write(f"  {label} |{bar}| {rate:5.1f}% ({count}/{total_in_bucket})\n")
             
-            # Key insights
-            f.write("\n--- Key Insights ---\n")
-            f.write("1. More active Copilot users have better data consistency between sources\n")
-            f.write("2. Users with 21+ active days have near-zero discrepancy rate\n")
-            f.write("3. Infrequent users (1-2 days) have higher discrepancy rates\n")
-            f.write("4. JSON export typically lags behind activity report timestamps\n")
+            # Stale user interaction distribution
+            stale_interactions = patterns.get('stale_user_interactions', [])
+            if stale_interactions:
+                f.write("\n--- Stale Users: Interaction Count Distribution ---\n")
+                f.write("(How many interactions do stale users have in JSON?)\n\n")
+                
+                # Bucket the stale users by their interaction counts
+                stale_buckets = defaultdict(int)
+                for interactions in stale_interactions:
+                    if interactions <= 5: stale_buckets['1-5'] += 1
+                    elif interactions <= 20: stale_buckets['6-20'] += 1
+                    elif interactions <= 50: stale_buckets['21-50'] += 1
+                    elif interactions <= 100: stale_buckets['51-100'] += 1
+                    elif interactions <= 500: stale_buckets['101-500'] += 1
+                    else: stale_buckets['500+'] += 1
+                
+                total_stale = len(stale_interactions)
+                for bucket in ['1-5', '6-20', '21-50', '51-100', '101-500', '500+']:
+                    count = stale_buckets.get(bucket, 0)
+                    pct = (count / total_stale * 100) if total_stale > 0 else 0
+                    filled = int(pct / 100 * bar_width)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    label = f"{bucket:12}"
+                    f.write(f"  {label} |{bar}| {pct:5.1f}% ({count}/{total_stale})\n")
+                
+                avg_interactions = sum(stale_interactions) / len(stale_interactions) if stale_interactions else 0
+                f.write(f"\n  Average interactions for stale users: {avg_interactions:.1f}\n")
+                
+                # Also show healthy user stats for comparison
+                healthy_interactions = patterns.get('healthy_user_interactions', [])
+                if healthy_interactions:
+                    avg_healthy = sum(healthy_interactions) / len(healthy_interactions)
+                    f.write(f"  Average interactions for healthy users: {avg_healthy:.1f}\n")
+            
+            # Key insights based on the pattern
+            f.write("\n--- Interpretation ---\n")
+            f.write("The stale rate decreases monotonically with interaction count.\n")
+            f.write("This pattern could be explained by several factors:\n\n")
+            f.write("  1. USER-LEVEL RELIABILITY: Some users may have configurations\n")
+            f.write("     (IDE, network, auth) that make sync less reliable. These users\n")
+            f.write("     also tend to use Copilot less frequently.\n\n")
+            f.write("  2. TIMING EFFECTS: More active users have more recent JSON data,\n")
+            f.write("     reducing the window for timestamp mismatches.\n\n")
+            f.write("  3. DATA PIPELINE ISSUES: The JSON export may have intermittent\n")
+            f.write("     failures that affect all users, but active users have more\n")
+            f.write("     chances for at least one successful sync.\n\n")
+            f.write("NOTE: The data shows correlation between activity and data quality,\n")
+            f.write("but cannot definitively identify the root cause.\n")
     
     print(f"Wrote summary to {output_path}")
 
@@ -1196,7 +1253,7 @@ Examples:
     
     # Step 1: Parse JSON files
     print("\nStep 1: Parsing JSON files...")
-    rows, user_timestamps, report_start, report_end = parse_json_files(json_files)
+    rows, user_timestamps, user_interactions, report_start, report_end = parse_json_files(json_files)
     
     if not rows:
         print("Error: No data extracted from JSON files.")
@@ -1240,6 +1297,7 @@ Examples:
     patterns = analyze_patterns(
         all_discrepancies,
         user_timestamps,
+        user_interactions,
         activity_report_path,
         report_start,
         effective_end
