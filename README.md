@@ -6,13 +6,21 @@ A Python script that compares GitHub Copilot usage data from the API against sea
 
 This tool helps GitHub Enterprise administrators identify inconsistencies between two Copilot data sources:
 
-1. **Copilot Usage API Data** - Detailed per-user, per-day usage records exported as JSON
+1. **Copilot Usage API Data** - Detailed per-user, per-timestamp usage records exported as JSON
 2. **Seat Activity Reports** - CSV exports showing last activity timestamps per user
 
-The script detects two types of discrepancies:
+The script detects three types of discrepancies:
 
 - **Missing Users**: Users who appear in the seat activity report (with activity within the report window) but have no corresponding records in the usage API data
-- **Date Mismatches**: Users who appear in both sources, but their "Last Activity At" date from the activity report does not match any activity day in the JSON data
+- **Timestamp Mismatches**: Users who appear in both sources, but their "Last Activity At" timestamp from the activity report does not match (within 24 hours) any timestamp in the JSON data
+- **IDE Mismatches**: Users where the timestamp matches exactly, but the IDE/surface differs between sources
+
+## 72-Hour Buffer
+
+The script automatically applies a 72-hour buffer to the analysis window because:
+- The Copilot usage JSON export has a known delay before data populates
+- Activity from the last 72 hours may not yet appear in the JSON export
+- This reduces false positives from timing delays
 
 ## Requirements
 
@@ -31,41 +39,34 @@ cd compare-copilot-activity-and-usage
 ## Usage
 
 ```bash
-python3 analyze_copilot_data.py \
-    --json-files usage-data-1.json usage-data-2.json \
-    --activity-report seat-activity.csv \
-    --output-dir ./output
+python3 analyze_copilot_data.py --data-dir ./my-data
 ```
 
 ### Command Line Arguments
 
 | Argument | Short | Required | Description |
 |----------|-------|----------|-------------|
-| `--json-files` | `-j` | Yes | One or more JSON/NDJSON files containing Copilot usage data |
-| `--activity-report` | `-a` | Yes | Path to the seat activity report CSV file |
-| `--output-dir` | `-o` | No | Directory for output files (default: current directory) |
+| `--data-dir` | `-d` | Yes | Directory containing JSON files and CSV activity report |
 
-### Examples
+The script will automatically find:
+- All `*.json` files in the directory (Copilot usage exports)
+- The first `*.csv` file in the directory (seat activity report)
 
-Analyze a single JSON file:
+Output files (`discrepancies.csv` and `summary.txt`) are written to the same directory.
 
-```bash
-python3 analyze_copilot_data.py -j usage.json -a activity.csv
-```
-
-Analyze multiple JSON files with custom output directory:
+### Example
 
 ```bash
-python3 analyze_copilot_data.py \
-    -j data-part1.json data-part2.json data-part3.json \
-    -a activity-report.csv \
-    -o ./analysis-results
-```
+# Create a directory with your data files
+mkdir my-analysis
+cp usage-*.json my-analysis/
+cp seat-activity.csv my-analysis/
 
-Use glob patterns to match all JSON files:
+# Run the analysis
+python3 analyze_copilot_data.py --data-dir ./my-analysis
 
-```bash
-python3 analyze_copilot_data.py -j *.json -a activity.csv
+# View results
+cat my-analysis/summary.txt
 ```
 
 ## Input Data Formats
@@ -80,6 +81,7 @@ The script expects JSON or NDJSON (newline-delimited JSON) files with records in
   "report_end_day": "2025-11-30",
   "day": "2025-11-15",
   "user_login": "octocat",
+  "sampled_at": "2025-11-15T14:30:00Z",
   "totals_by_ide": [
     {
       "ide": "vscode",
@@ -111,33 +113,54 @@ The activity report CSV should contain these columns:
 
 ### discrepancies.csv
 
-Contains all users with discrepancies, including all original columns from the activity report plus:
+Contains all users with discrepancies, including:
 
 | Column | Description |
 |--------|-------------|
-| `Discrepancy Type` | Either `missing_from_json` or `date_mismatch` |
-| `JSON Activity Dates` | Comma-separated list of activity dates found in JSON (empty for missing users) |
-| `Latest JSON Date` | Most recent activity date from JSON data (empty for missing users) |
+| `Login` | GitHub username |
+| `Last Activity At` | Timestamp from activity report |
+| `Last Surface Used` | IDE/surface from activity report |
+| `JSON Timestamps` | Comma-separated list of timestamps found in JSON |
+| `Latest JSON Timestamp` | Most recent timestamp from JSON (empty for missing users) |
+| `JSON IDE/Version` | IDE info from JSON on exact match (for IDE mismatch analysis) |
+| `Issue` | `missing_from_json`, `timestamp_mismatch`, or `ide_mismatch` |
 
 ### summary.txt
 
-A text file containing:
-- Report window dates (extracted from JSON data)
+A comprehensive text file containing:
+- Report window dates (with 72-hour buffer applied)
 - User counts from each data source
-- Breakdown of discrepancies by type
-- Surface/IDE breakdown for each discrepancy type
+- Breakdown of discrepancies by type and surface/IDE
+- Pattern analysis:
+  - Discrepancies by date
+  - Discrepancies by day of week
+  - Timestamp gap analysis
+  - Discrepancy rate by user activity level
+- Key insights about data consistency
 
 ## How It Works
 
-1. **Parse JSON Files**: Reads all provided JSON/NDJSON files and extracts user activity records, building a map of each user to their activity dates.
+1. **Parse JSON Files**: Reads all JSON/NDJSON files from the data directory and extracts user activity records, building a map of each user to their timestamps and IDE info.
 
-2. **Extract Report Window**: Determines the report date range from the `report_start_day` and `report_end_day` fields in the JSON data.
+2. **Extract Report Window**: Determines the report date range from the JSON data, then applies a 72-hour buffer to exclude recent activity that may not have populated yet.
 
-3. **Analyze Activity Report**: For each user in the CSV with a "Last Activity At" date within the report window:
-   - If the user is not found in the JSON data: marked as `missing_from_json`
-   - If the user is found but their last activity date does not match any JSON activity date: marked as `date_mismatch`
+3. **Analyze Activity Report**: For each user in the CSV with a "Last Activity At" timestamp within the effective report window:
+   - If the user is not found in the JSON data → `missing_from_json`
+   - If the user is found but their timestamp doesn't match within 24 hours → `timestamp_mismatch`
+   - If the timestamp matches exactly but the IDE differs → `ide_mismatch`
 
-4. **Generate Output**: Writes the discrepancies to CSV and a summary to a text file.
+4. **Pattern Analysis**: Analyzes discrepancy patterns by date, day of week, and user activity level to identify systemic issues.
+
+5. **Generate Output**: Writes detailed discrepancies to CSV and a comprehensive summary to a text file.
+
+## IDE Matching Logic
+
+The script uses intelligent IDE matching to reduce false positives:
+
+- **JetBrains normalization**: All JetBrains IDEs (`JetBrains-IU`, `JetBrains-PY`, etc.) map to `intellij` (what the JSON reports)
+- **Version comparison**: Checks if the major version number matches
+- **Plugin tolerance**: Allows matches where JSON is missing plugin version info
+- **Neovim exclusion**: Skips Neovim users (not expected in JSON export)
 
 ## License
 
