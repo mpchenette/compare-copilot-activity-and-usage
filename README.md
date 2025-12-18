@@ -52,7 +52,7 @@ The script will automatically find:
 - All `*.json` files in the directory (Copilot usage exports)
 - The first `*.csv` file in the directory (seat activity report)
 
-Output files (`discrepancies.csv` and `summary.txt`) are written to the same directory.
+Output files are written to an `output/` subdirectory within the data directory.
 
 ### Example
 
@@ -65,8 +65,8 @@ cp seat-activity.csv my-analysis/
 # Run the analysis
 python3 analyze_copilot_data.py --data-dir ./my-analysis
 
-# View results
-cat my-analysis/summary.txt
+# View results (output is in the 'output' subdirectory)
+cat my-analysis/output/summary.txt
 ```
 
 ## Input Data Formats

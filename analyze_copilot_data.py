@@ -819,8 +819,9 @@ Examples:
     
     activity_report_path = csv_files[0]
     
-    # Output files go in the same directory
-    output_dir = args.data_dir
+    # Output files go in an 'output' subdirectory
+    output_dir = os.path.join(args.data_dir, 'output')
+    os.makedirs(output_dir, exist_ok=True)
     discrepancies_csv_path = os.path.join(output_dir, 'discrepancies.csv')
     summary_path = os.path.join(output_dir, 'summary.txt')
     
@@ -834,6 +835,7 @@ Examples:
     print("=" * 60 + "\n")
     
     print(f"Data directory: {args.data_dir}")
+    print(f"Output directory: {output_dir}")
     print(f"JSON files: {len(json_files)}")
     print(f"Activity report: {os.path.basename(activity_report_path)}")
     print(f"\nNote: Only analyzing activity > 72 hours old (before {cutoff_date})")
