@@ -35,22 +35,30 @@ JSON_EXPORT_DELAY_HOURS = 72
 
 # Mapping from activity report surface/IDE names to JSON IDE names
 # Note: JSON export reports ALL JetBrains IDEs as 'intellij'
+# Note: Eclipse IDE with Copilot plugin also reports as 'intellij' in JSON
 SURFACE_TO_JSON_IDE = {
     'vscode': 'vscode',
     'vscode-chat': 'vscode',
-    'jetbrains-iu': 'intellij',
-    'jetbrains-py': 'intellij',  # PyCharm reports as intellij
-    'jetbrains-cl': 'intellij',  # CLion reports as intellij
-    'jetbrains-go': 'intellij',  # GoLand reports as intellij
-    'jetbrains-rm': 'intellij',  # RubyMine reports as intellij
-    'jetbrains-ws': 'intellij',  # WebStorm reports as intellij
-    'jetbrains-rd': 'intellij',  # Rider reports as intellij
-    'jetbrains-ps': 'intellij',  # PhpStorm reports as intellij
-    'jetbrains-db': 'intellij',  # DataGrip reports as intellij
-    'jetbrains-jbc': 'intellij', # JetBrains Client reports as intellij
-    'jetbrains-ai': 'intellij',  # JetBrains AI Assistant reports as intellij
-    'jetbrains-pc': 'intellij',  # PyCharm Community reports as intellij
+    'jetbrains-iu': 'intellij',   # IntelliJ IDEA Ultimate
+    'jetbrains-ic': 'intellij',   # IntelliJ IDEA Community
+    'jetbrains-py': 'intellij',   # PyCharm Professional
+    'jetbrains-pc': 'intellij',   # PyCharm Community
+    'jetbrains-cl': 'intellij',   # CLion
+    'jetbrains-go': 'intellij',   # GoLand
+    'jetbrains-rm': 'intellij',   # RubyMine
+    'jetbrains-ws': 'intellij',   # WebStorm
+    'jetbrains-rd': 'intellij',   # Rider
+    'jetbrains-ps': 'intellij',   # PhpStorm
+    'jetbrains-db': 'intellij',   # DataGrip
+    'jetbrains-jbc': 'intellij',  # JetBrains Client
+    'jetbrains-ai': 'intellij',   # JetBrains AI Assistant
+    'jetbrains-equivalent-eclipse ide': 'intellij',  # Eclipse with JetBrains equivalent
+    'jetbrains-equivalent-ibm developer for z': 'intellij',  # IBM with JetBrains equivalent
+    'eclipse ide': 'intellij',    # Eclipse IDE with Copilot uses JetBrains plugin -> reports as intellij
+    'eclipse': 'intellij',        # Eclipse with Copilot uses JetBrains plugin -> reports as intellij
+    'ibm developer for z': 'intellij',  # IBM Developer for z with Copilot -> reports as intellij
     'visualstudio': 'visualstudio',
+    'vs': 'visualstudio',         # Visual Studio shorthand
     'neovim': 'neovim',
     'vim': 'vim',
     'emacs': 'emacs',
@@ -397,7 +405,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'timestamp_mismatch_count': 0,
         'ide_mismatch_count': 0,
         'missing_surface_breakdown': defaultdict(int),
-        'timestamp_mismatch_surface_breakdown': defaultdict(int)
+        'timestamp_mismatch_surface_breakdown': defaultdict(int),
+        'ide_mismatch_surface_breakdown': defaultdict(int)
     }
     
     with open(activity_report_path, 'r') as f:
@@ -491,6 +500,7 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                                 
                                 if not ide_matches:
                                     stats['ide_mismatch_count'] += 1
+                                    stats['ide_mismatch_surface_breakdown'][surface] += 1
                                     
                                     discrepancy_row = {
                                         'Login': login,
@@ -685,7 +695,8 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("COPILOT USAGE DATA ANALYSIS SUMMARY\n")
         f.write("=" * 60 + "\n\n")
         
-        f.write(f"Report Window: {report_start} to {report_end}\n\n")
+        f.write(f"Report Window: {report_start} to {report_end}\n")
+        f.write(f"  (Excluding latest 72 hours - JSON export has a population delay)\n\n")
         
         f.write("--- JSON Usage Data ---\n")
         f.write(f"Unique users in JSON data: {distilled_users_count:,}\n\n")
@@ -694,6 +705,22 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write(f"Total users in activity report: {stats['total_activity_users']:,}\n")
         f.write(f"Users with activity data: {stats['users_with_activity']:,}\n")
         f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
+        
+        # Calculate total discrepancies and affected user percentage
+        total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
+        affected_pct = (total_discrepancies / stats['users_active_in_window'] * 100) if stats['users_active_in_window'] > 0 else 0
+        
+        # Calculate VS Code percentage
+        vscode_missing = stats['missing_surface_breakdown'].get('vscode', 0)
+        vscode_timestamp = stats['timestamp_mismatch_surface_breakdown'].get('vscode', 0)
+        vscode_ide = stats.get('ide_mismatch_surface_breakdown', {}).get('vscode', 0)
+        vscode_total = vscode_missing + vscode_timestamp + vscode_ide
+        vscode_pct = (vscode_total / total_discrepancies * 100) if total_discrepancies > 0 else 0
+        
+        f.write("--- Impact Summary ---\n")
+        f.write(f"Total discrepancies: {total_discrepancies:,}\n")
+        f.write(f"Active users affected: {affected_pct:.1f}% ({total_discrepancies:,} of {stats['users_active_in_window']:,} active users)\n")
+        f.write(f"VS Code share of issues: {vscode_pct:.1f}% ({vscode_total:,} of {total_discrepancies:,} discrepancies)\n\n")
         
         f.write("--- Missing Users (in activity report but NOT in JSON) ---\n")
         f.write(f"Count: {stats['missing_count']:,}\n")
