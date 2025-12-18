@@ -15,11 +15,11 @@ The script detects three types of discrepancies:
 - **Timestamp Mismatches**: Users who appear in both sources, but their "Last Activity At" timestamp from the activity report does not match (within 24 hours) any timestamp in the JSON data
 - **IDE Mismatches**: Users where the timestamp matches exactly, but the IDE/surface differs between sources
 
-## 72-Hour Buffer
+## 96-Hour Buffer
 
-The script automatically applies a 72-hour buffer to the analysis window because:
+The script automatically applies a 96-hour buffer to the analysis window because:
 - The Copilot usage JSON export has a known delay before data populates
-- Activity from the last 72 hours may not yet appear in the JSON export
+- Activity from the last 96 hours may not yet appear in the JSON export
 - This reduces false positives from timing delays
 
 ## Requirements
@@ -128,7 +128,7 @@ Contains all users with discrepancies, including:
 ### summary.txt
 
 A comprehensive text file containing:
-- Report window dates (with 72-hour buffer applied)
+- Report window dates (with 96-hour buffer applied)
 - User counts from each data source
 - Breakdown of discrepancies by type and surface/IDE
 - Pattern analysis:
@@ -142,7 +142,7 @@ A comprehensive text file containing:
 
 1. **Parse JSON Files**: Reads all JSON/NDJSON files from the data directory and extracts user activity records, building a map of each user to their timestamps and IDE info.
 
-2. **Extract Report Window**: Determines the report date range from the JSON data, then applies a 72-hour buffer to exclude recent activity that may not have populated yet.
+2. **Extract Report Window**: Determines the report date range from the JSON data, then applies a 96-hour buffer to exclude recent activity that may not have populated yet.
 
 3. **Analyze Activity Report**: For each user in the CSV with a "Last Activity At" timestamp within the effective report window:
    - If the user is not found in the JSON data → `missing_from_json`

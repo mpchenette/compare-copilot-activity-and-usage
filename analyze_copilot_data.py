@@ -29,8 +29,9 @@ from datetime import datetime, timedelta
 from collections import defaultdict
 
 
-# JSON export has a 72-hour delay before data is populated
-JSON_EXPORT_DELAY_HOURS = 72
+# JSON export has up to a 4-day delay before data is populated
+# (3 full UTC days normally, up to 4 days with weekend processing delays)
+JSON_EXPORT_DELAY_HOURS = 96
 
 
 # Mapping from activity report surface/IDE names to JSON IDE names
@@ -964,7 +965,7 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("=" * 60 + "\n\n")
         
         f.write(f"Report Window: {report_start} to {report_end}\n")
-        f.write(f"  (Excluding latest 72 hours - JSON export has a population delay)\n\n")
+        f.write(f"  (Excluding latest 96 hours - JSON export has a population delay)\n\n")
         
         f.write("--- JSON Usage Data ---\n")
         f.write(f"Unique users in JSON data: {distilled_users_count:,}\n\n")
@@ -975,7 +976,7 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
         
         # Calculate total discrepancies and affected user percentage
-        # Use total users with activity (not just window) since 72-hour buffer excludes recent active users
+        # Use total users with activity (not just window) since 96-hour buffer excludes recent active users
         total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count']
         affected_pct = (total_discrepancies / stats['users_with_activity'] * 100) if stats['users_with_activity'] > 0 else 0
         
@@ -988,7 +989,7 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("--- Impact Summary ---\n")
         f.write(f"Total discrepancies: {total_discrepancies:,}\n")
         f.write(f"Total active user base affected: >{affected_pct:.1f}% ({total_discrepancies:,} of {stats['users_with_activity']:,} users with activity)\n")
-        f.write(f"  Note: Actual % likely higher - 72-hour buffer excludes recently active users from analysis\n")
+        f.write(f"  Note: Actual % likely higher - 96-hour buffer excludes recently active users from analysis\n")
         f.write(f"VS Code share of issues: {vscode_pct:.1f}% ({vscode_total:,} of {total_discrepancies:,} discrepancies)\n\n")
         
         f.write("--- Missing Users (in activity report but NOT in JSON) ---\n")
@@ -1132,7 +1133,7 @@ Examples:
         print("Warning: Could not find Report Time in activity report, using current date")
         report_generated_date = datetime.now().strftime('%Y-%m-%d')
     
-    # Calculate cutoff date (72 hours before report generation) - JSON export has a delay
+    # Calculate cutoff date (96 hours before report generation) - JSON export has a delay
     report_datetime = datetime.strptime(report_generated_date, '%Y-%m-%d')
     cutoff_datetime = report_datetime - timedelta(hours=JSON_EXPORT_DELAY_HOURS)
     cutoff_date = cutoff_datetime.strftime('%Y-%m-%d')
@@ -1146,7 +1147,7 @@ Examples:
     print(f"JSON files: {len(json_files)}")
     print(f"Activity report: {os.path.basename(activity_report_path)}")
     print(f"Activity report generated: {report_generated_date}")
-    print(f"\nNote: Only analyzing activity > 72 hours before report generation (before {cutoff_date})")
+    print(f"\nNote: Only analyzing activity > 96 hours before report generation (before {cutoff_date})")
     print(f"      JSON export has a {JSON_EXPORT_DELAY_HOURS}-hour delay before data populates.")
     
     # Step 1: Parse JSON files
@@ -1201,7 +1202,7 @@ Examples:
     print("\n" + "=" * 60)
     print("SUMMARY")
     print("=" * 60)
-    print(f"Analysis Window: {report_start} to {effective_end} (72-hour buffer applied)")
+    print(f"Analysis Window: {report_start} to {effective_end} (96-hour buffer applied)")
     print(f"Unique users in JSON data: {len(distilled_users):,}")
     print(f"Total users in activity report: {stats['total_activity_users']:,}")
     print(f"Users active within report window: {stats['users_active_in_window']:,}")
