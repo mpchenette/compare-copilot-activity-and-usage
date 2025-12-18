@@ -99,6 +99,17 @@ MIN_VERSIONS = {
     },
 }
 
+# All copilot-chat extension versions (reverse chronological order - newest first)
+COPILOT_CHAT_VERSIONS = [
+    '0.35.1', '0.35.0',
+    '0.33.5', '0.33.4', '0.33.3', '0.33.2', '0.33.1', '0.33.0',
+    '0.32.5', '0.32.4', '0.32.3', '0.32.2', '0.32.1', '0.32.0',
+    '0.31.5', '0.31.4', '0.31.3', '0.31.2', '0.31.1', '0.31.0',
+    '0.30.3', '0.30.2', '0.30.1', '0.30.0',
+    '0.29.1', '0.29.0',
+    '0.28.5', '0.28.4', '0.28.3', '0.28.2', '0.28.1', '0.28.0',
+]
+
 
 def parse_version(version_str):
     """
@@ -528,11 +539,12 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'users_unsupported_version': 0,
         'missing_count': 0,
         'timestamp_mismatch_count': 0,
-        'ide_mismatch_count': 0,
         'missing_surface_breakdown': defaultdict(int),
         'timestamp_mismatch_surface_breakdown': defaultdict(int),
-        'ide_mismatch_surface_breakdown': defaultdict(int),
-        'unsupported_version_breakdown': defaultdict(int)
+        'missing_extension_breakdown': defaultdict(int),
+        'timestamp_mismatch_extension_breakdown': defaultdict(int),
+        'unsupported_version_breakdown': defaultdict(int),
+        'all_copilot_chat_versions': set()  # Track all versions seen in activity report
     }
     
     with open(activity_report_path, 'r') as f:
@@ -579,10 +591,23 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         normalized_surface = normalize_surface_to_json_format(last_surface)
                         normalized_report_ts = normalize_timestamp(last_activity_at)
                         
+                        # Extract extension version from surface string
+                        ext_version = 'unknown'
+                        if last_surface:
+                            surface_parts = last_surface.split('/')
+                            if len(surface_parts) >= 4:
+                                ext_version = f"{surface_parts[2]}/{surface_parts[3]}"
+                                # Track copilot-chat versions seen in activity report
+                                if surface_parts[2] == 'copilot-chat':
+                                    stats['all_copilot_chat_versions'].add(surface_parts[3])
+                            elif len(surface_parts) >= 2:
+                                ext_version = surface_parts[0]
+                        
                         # Check if NOT in JSON data at all
                         if login not in distilled_users:
                             stats['missing_count'] += 1
                             stats['missing_surface_breakdown'][surface] += 1
+                            stats['missing_extension_breakdown'][ext_version] += 1
                             
                             discrepancy_row = {
                                 'Login': login,
@@ -616,6 +641,7 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                                 # No timestamp within 1 hour - flag as mismatch
                                 stats['timestamp_mismatch_count'] += 1
                                 stats['timestamp_mismatch_surface_breakdown'][surface] += 1
+                                stats['timestamp_mismatch_extension_breakdown'][ext_version] += 1
                                 
                                 discrepancy_row = {
                                     'Login': login,
@@ -627,26 +653,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                                     'Report Generated': row.get('Report Time', '')
                                 }
                                 all_discrepancies.append(discrepancy_row)
-                            elif exact_match:
-                                # Exact timestamp match - check IDE
-                                json_ide = timestamp_to_ide.get(normalized_report_ts, '')
-                                ide_matches = ide_matches_partial(last_surface, json_ide)
-                                
-                                if not ide_matches:
-                                    stats['ide_mismatch_count'] += 1
-                                    stats['ide_mismatch_surface_breakdown'][surface] += 1
-                                    
-                                    discrepancy_row = {
-                                        'Login': login,
-                                        'Status': 'IDE Mismatch',
-                                        'Last Activity At': last_activity_at,
-                                        'Latest Export Activity': most_recent_json_ts,
-                                        'Report Surface': last_surface,
-                                        'JSON IDE': json_ide,
-                                        'Report Generated': row.get('Report Time', '')
-                                    }
-                                    all_discrepancies.append(discrepancy_row)
-                            # else: within tolerance but not exact - no discrepancy
+                            # else: exact match or within tolerance - no discrepancy
+                            # (IDE differences are not tracked as discrepancies)
                             
                 except ValueError:
                     continue
@@ -795,6 +803,38 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
     return patterns
 
 
+def format_copilot_chat_breakdown(extension_breakdown, all_versions_in_report):
+    """
+    Format copilot-chat extension breakdown in reverse chronological order.
+    Only includes versions that exist in the customer's activity report.
+    
+    Args:
+        extension_breakdown: Dict mapping extension string -> count (discrepancies)
+        all_versions_in_report: Set of all copilot-chat versions seen in activity report
+        
+    Returns:
+        List of (version_string, count) tuples in reverse chronological order
+    """
+    # Extract copilot-chat versions and their discrepancy counts
+    discrepancy_counts = {}
+    for ext, count in extension_breakdown.items():
+        if ext.startswith('copilot-chat/'):
+            version = ext.replace('copilot-chat/', '')
+            discrepancy_counts[version] = count
+    
+    if not all_versions_in_report:
+        return []
+    
+    # Build result with only versions present in customer data, in reverse chron order
+    result = []
+    for ver in COPILOT_CHAT_VERSIONS:
+        if ver in all_versions_in_report:
+            count = discrepancy_counts.get(ver, 0)
+            result.append((f"copilot-chat/{ver}", count))
+    
+    return result
+
+
 def write_discrepancies_csv(discrepancies, fieldnames, output_path):
     """
     Write discrepancy data to CSV, preserving all original activity report columns.
@@ -838,29 +878,17 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("--- Activity Report ---\n")
         f.write(f"Total users in activity report: {stats['total_activity_users']:,}\n")
         f.write(f"Users with activity data: {stats['users_with_activity']:,}\n")
-        f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n")
-        f.write(f"Users on unsupported versions (excluded): {stats['users_unsupported_version']:,}\n\n")
-        
-        # Show unsupported version breakdown if any
-        if stats['users_unsupported_version'] > 0:
-            f.write("--- Users on Unsupported Versions (excluded from analysis) ---\n")
-            f.write(f"Count: {stats['users_unsupported_version']:,}\n")
-            f.write("These users are expected to be missing from JSON export.\n")
-            f.write("Breakdown by Surface Type:\n")
-            for surface, count in sorted(stats['unsupported_version_breakdown'].items(), key=lambda x: -x[1]):
-                f.write(f"  {surface}: {count:,}\n")
-            f.write("\n")
+        f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
         
         # Calculate total discrepancies and affected user percentage
         # Use total users with activity (not just window) since 72-hour buffer excludes recent active users
-        total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
+        total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count']
         affected_pct = (total_discrepancies / stats['users_with_activity'] * 100) if stats['users_with_activity'] > 0 else 0
         
         # Calculate VS Code percentage
         vscode_missing = stats['missing_surface_breakdown'].get('vscode', 0)
         vscode_timestamp = stats['timestamp_mismatch_surface_breakdown'].get('vscode', 0)
-        vscode_ide = stats.get('ide_mismatch_surface_breakdown', {}).get('vscode', 0)
-        vscode_total = vscode_missing + vscode_timestamp + vscode_ide
+        vscode_total = vscode_missing + vscode_timestamp
         vscode_pct = (vscode_total / total_discrepancies * 100) if total_discrepancies > 0 else 0
         
         f.write("--- Impact Summary ---\n")
@@ -874,15 +902,18 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write("Breakdown by Surface Type:\n")
         for surface, count in sorted(stats['missing_surface_breakdown'].items(), key=lambda x: -x[1]):
             f.write(f"  {surface}: {count:,}\n")
+        f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
+        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], stats['all_copilot_chat_versions']):
+            f.write(f"  {ext}: {count:,}\n")
         
         f.write("\n--- Timestamp Mismatches (user in JSON but timestamp not found) ---\n")
         f.write(f"Count: {stats['timestamp_mismatch_count']:,}\n")
         f.write("Breakdown by Surface Type:\n")
         for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
             f.write(f"  {surface}: {count:,}\n")
-        
-        f.write("\n--- IDE Mismatches (timestamp matches but IDE differs) ---\n")
-        f.write(f"Count: {stats['ide_mismatch_count']:,}\n")
+        f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
+        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], stats['all_copilot_chat_versions']):
+            f.write(f"  {ext}: {count:,}\n")
         
         # Add pattern analysis if available
         if patterns:
@@ -894,13 +925,8 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
             f.write("\n--- Discrepancies by Date ---\n")
             for date in sorted(patterns['by_date'].keys()):
                 counts = patterns['by_date'][date]
-                total = sum(counts.values())
-                f.write(f"  {date}: {total:4d} total (Missing:{counts['Missing']:3d}, Timestamp:{counts['Timestamp']:3d}, IDE:{counts['IDE']:2d})\n")
-            
-            # By day of week
-            f.write("\n--- Discrepancies by Day of Week ---\n")
-            for dow in ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']:
-                f.write(f"  {dow}: {patterns['by_day_of_week'].get(dow, 0)}\n")
+                total = counts.get('Missing', 0) + counts.get('Timestamp', 0)
+                f.write(f"  {date}: {total:4d} total (Missing:{counts.get('Missing', 0):3d}, Timestamp:{counts.get('Timestamp', 0):3d})\n")
             
             # Timestamp gap analysis
             f.write("\n--- Timestamp Gap Analysis ---\n")
@@ -1071,9 +1097,8 @@ Examples:
     print(f"Unique users in JSON data: {len(distilled_users):,}")
     print(f"Total users in activity report: {stats['total_activity_users']:,}")
     print(f"Users active within report window: {stats['users_active_in_window']:,}")
-    print(f"Users on unsupported versions (excluded): {stats['users_unsupported_version']:,}")
     
-    total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
+    total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count']
     print(f"\nTotal discrepancies: {total_discrepancies:,}")
     
     print(f"\n  Missing users (in activity report but NOT in JSON): {stats['missing_count']:,}")
@@ -1085,8 +1110,6 @@ Examples:
     print("  Breakdown by surface:")
     for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
         print(f"    {surface}: {count:,}")
-    
-    print(f"\n  IDE mismatches (timestamp matches but IDE differs): {stats['ide_mismatch_count']:,}")
     
     # Print pattern insights
     print("\n" + "-" * 60)
