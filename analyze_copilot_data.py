@@ -707,8 +707,9 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
         
         # Calculate total discrepancies and affected user percentage
+        # Use total users with activity (not just window) since 72-hour buffer excludes recent active users
         total_discrepancies = stats['missing_count'] + stats['timestamp_mismatch_count'] + stats['ide_mismatch_count']
-        affected_pct = (total_discrepancies / stats['users_active_in_window'] * 100) if stats['users_active_in_window'] > 0 else 0
+        affected_pct = (total_discrepancies / stats['users_with_activity'] * 100) if stats['users_with_activity'] > 0 else 0
         
         # Calculate VS Code percentage
         vscode_missing = stats['missing_surface_breakdown'].get('vscode', 0)
@@ -719,7 +720,8 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         
         f.write("--- Impact Summary ---\n")
         f.write(f"Total discrepancies: {total_discrepancies:,}\n")
-        f.write(f"Active users affected: {affected_pct:.1f}% ({total_discrepancies:,} of {stats['users_active_in_window']:,} active users)\n")
+        f.write(f"Total active user base affected: >{affected_pct:.1f}% ({total_discrepancies:,} of {stats['users_with_activity']:,} users with activity)\n")
+        f.write(f"  Note: Actual % likely higher - 72-hour buffer excludes recently active users from analysis\n")
         f.write(f"VS Code share of issues: {vscode_pct:.1f}% ({vscode_total:,} of {total_discrepancies:,} discrepancies)\n\n")
         
         f.write("--- Missing Users (in activity report but NOT in JSON) ---\n")
