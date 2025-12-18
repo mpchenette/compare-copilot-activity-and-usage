@@ -803,6 +803,100 @@ def analyze_patterns(discrepancies, user_timestamps, activity_report_path, repor
     return patterns
 
 
+def generate_ascii_line_graph(data_by_date, graph_height=10, graph_width=60):
+    """
+    Generate an ASCII line graph for discrepancies over time.
+    
+    Args:
+        data_by_date: Dict mapping date string -> {'Missing': int, 'Timestamp': int}
+        graph_height: Height of the graph in lines
+        graph_width: Width of the graph in characters
+        
+    Returns:
+        List of strings representing the graph
+    """
+    if not data_by_date:
+        return ["  No data available"]
+    
+    # Get sorted dates and totals
+    sorted_dates = sorted(data_by_date.keys())
+    totals = [data_by_date[d].get('Missing', 0) + data_by_date[d].get('Timestamp', 0) for d in sorted_dates]
+    
+    if not totals:
+        return ["  No data available"]
+    
+    max_val = max(totals) if totals else 1
+    min_val = min(totals) if totals else 0
+    
+    # Calculate how many data points to show (compress if needed)
+    num_points = len(totals)
+    
+    # Build the graph
+    lines = []
+    
+    # Y-axis labels width
+    y_label_width = len(str(max_val)) + 1
+    
+    # Create the graph rows
+    for row in range(graph_height, -1, -1):
+        threshold = min_val + (max_val - min_val) * row / graph_height if graph_height > 0 else 0
+        
+        # Y-axis label
+        if row == graph_height:
+            label = str(max_val).rjust(y_label_width)
+        elif row == 0:
+            label = str(min_val).rjust(y_label_width)
+        elif row == graph_height // 2:
+            mid_val = (max_val + min_val) // 2
+            label = str(mid_val).rjust(y_label_width)
+        else:
+            label = ' ' * y_label_width
+        
+        # Build the row
+        row_chars = []
+        for i, val in enumerate(totals):
+            if val >= threshold:
+                # Check if this is peak (local maximum)
+                is_peak = (i == 0 or val >= totals[i-1]) and (i == len(totals)-1 or val >= totals[i+1])
+                if row == graph_height and val == max_val:
+                    row_chars.append('█')
+                elif val == max_val and is_peak:
+                    row_chars.append('█')
+                else:
+                    row_chars.append('▓')
+            else:
+                row_chars.append(' ')
+        
+        lines.append(f"  {label} │{' '.join(row_chars)}")
+    
+    # X-axis
+    x_axis = f"  {' ' * y_label_width} └{'──' * len(totals)}"
+    lines.append(x_axis)
+    
+    # Date labels (start, middle, end)
+    if sorted_dates:
+        start_date = sorted_dates[0][5:]  # MM-DD
+        end_date = sorted_dates[-1][5:]    # MM-DD
+        mid_idx = len(sorted_dates) // 2
+        mid_date = sorted_dates[mid_idx][5:] if mid_idx < len(sorted_dates) else ''
+        
+        # Position the labels (account for spaces between columns)
+        graph_width = len(totals) * 2 - 1  # Each column + space between
+        mid_pos = graph_width // 2 - 2
+        
+        # Simple label line
+        label_line = f"  {' ' * y_label_width}  {start_date}{' ' * (mid_pos - 5)}{mid_date}{' ' * (mid_pos - 5)}{end_date}"
+        lines.append(label_line)
+    
+    # Summary line
+    total_discrepancies = sum(totals)
+    avg_per_day = total_discrepancies / len(totals) if totals else 0
+    lines.append(f"")
+    lines.append(f"  Total: {total_discrepancies:,} discrepancies over {len(totals)} days (avg: {avg_per_day:.1f}/day, max: {max_val})")
+    
+    return lines
+
+
 def format_copilot_chat_breakdown(extension_breakdown, all_versions_in_report):
     """
     Format copilot-chat extension breakdown in reverse chronological order.
@@ -921,12 +1015,10 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
             f.write("PATTERN ANALYSIS\n")
             f.write("=" * 60 + "\n")
             
-            # By date
-            f.write("\n--- Discrepancies by Date ---\n")
-            for date in sorted(patterns['by_date'].keys()):
-                counts = patterns['by_date'][date]
-                total = counts.get('Missing', 0) + counts.get('Timestamp', 0)
-                f.write(f"  {date}: {total:4d} total (Missing:{counts.get('Missing', 0):3d}, Timestamp:{counts.get('Timestamp', 0):3d})\n")
+            # By date - ASCII line graph
+            f.write("\n--- Discrepancies by Date (ASCII Graph) ---\n")
+            for line in generate_ascii_line_graph(patterns['by_date'], graph_height=28, graph_width=28):
+                f.write(line + "\n")
             
             # Timestamp gap analysis
             f.write("\n--- Timestamp Gap Analysis ---\n")
@@ -1025,9 +1117,24 @@ Examples:
     discrepancies_csv_path = os.path.join(output_dir, 'discrepancies.csv')
     summary_path = os.path.join(output_dir, 'summary.txt')
     
-    # Calculate cutoff date (72 hours ago) - JSON export has a delay
-    now = datetime.now()
-    cutoff_datetime = now - timedelta(hours=JSON_EXPORT_DELAY_HOURS)
+    # Extract report generation date from activity report CSV
+    report_generated_date = None
+    with open(activity_report_path, 'r') as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            report_time = row.get('Report Time', '')
+            if report_time:
+                # Parse the report timestamp (e.g., '2025-12-17T20:15:05Z')
+                report_generated_date = report_time[:10]  # YYYY-MM-DD
+                break
+    
+    if not report_generated_date:
+        print("Warning: Could not find Report Time in activity report, using current date")
+        report_generated_date = datetime.now().strftime('%Y-%m-%d')
+    
+    # Calculate cutoff date (72 hours before report generation) - JSON export has a delay
+    report_datetime = datetime.strptime(report_generated_date, '%Y-%m-%d')
+    cutoff_datetime = report_datetime - timedelta(hours=JSON_EXPORT_DELAY_HOURS)
     cutoff_date = cutoff_datetime.strftime('%Y-%m-%d')
     
     print("\n" + "=" * 60)
@@ -1038,7 +1145,8 @@ Examples:
     print(f"Output directory: {output_dir}")
     print(f"JSON files: {len(json_files)}")
     print(f"Activity report: {os.path.basename(activity_report_path)}")
-    print(f"\nNote: Only analyzing activity > 72 hours old (before {cutoff_date})")
+    print(f"Activity report generated: {report_generated_date}")
+    print(f"\nNote: Only analyzing activity > 72 hours before report generation (before {cutoff_date})")
     print(f"      JSON export has a {JSON_EXPORT_DELAY_HOURS}-hour delay before data populates.")
     
     # Step 1: Parse JSON files
