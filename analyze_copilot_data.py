@@ -573,6 +573,11 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         if last_surface:
                             parts = last_surface.split('/')
                             surface = parts[0]
+                            # Convert "unknown/GitHubCopilotChat/X.X.X" to vscode
+                            # These are VS Code users where IDE wasn't properly identified
+                            if surface.lower() == 'unknown' and len(parts) >= 2:
+                                if 'copilot' in parts[1].lower():
+                                    surface = 'vscode'
                         else:
                             surface = 'unknown'
                         
@@ -597,10 +602,22 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         if last_surface:
                             surface_parts = last_surface.split('/')
                             if len(surface_parts) >= 4:
-                                ext_version = f"{surface_parts[2]}/{surface_parts[3]}"
+                                ext_name = surface_parts[2]
+                                ext_ver = surface_parts[3]
+                                ext_version = f"{ext_name}/{ext_ver}"
                                 # Track copilot-chat versions seen in activity report
-                                if surface_parts[2] == 'copilot-chat':
-                                    stats['all_copilot_chat_versions'].add(surface_parts[3])
+                                if ext_name == 'copilot-chat':
+                                    stats['all_copilot_chat_versions'].add(ext_ver)
+                            elif len(surface_parts) >= 3:
+                                # Handle "unknown/GitHubCopilotChat/0.33.3" format
+                                ext_name = surface_parts[1]
+                                ext_ver = surface_parts[2]
+                                # Normalize GitHubCopilotChat -> copilot-chat
+                                if ext_name.lower() == 'githubcopilotchat':
+                                    ext_name = 'copilot-chat'
+                                ext_version = f"{ext_name}/{ext_ver}"
+                                if ext_name == 'copilot-chat':
+                                    stats['all_copilot_chat_versions'].add(ext_ver)
                             elif len(surface_parts) >= 2:
                                 ext_version = surface_parts[0]
                         
@@ -947,7 +964,7 @@ def write_discrepancies_csv(discrepancies, fieldnames, output_path):
     print(f"Wrote {len(discrepancies)} discrepancies to {output_path}")
 
 
-def write_summary(stats, report_start, report_end, distilled_users_count, output_path, patterns=None):
+def write_summary(stats, report_start, report_end, distilled_users_count, output_path, patterns=None, customer_name=None):
     """
     Write summary statistics to a text file.
     
@@ -958,10 +975,14 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         distilled_users_count: Number of unique users in JSON data
         output_path: Path to output summary file
         patterns: Optional pattern analysis dict
+        customer_name: Customer name for the report header
     """
     with open(output_path, 'w') as f:
         f.write("=" * 60 + "\n")
-        f.write("COPILOT USAGE DATA ANALYSIS SUMMARY\n")
+        if customer_name:
+            f.write(f"{customer_name.upper()} - COPILOT USAGE DATA ANALYSIS\n")
+        else:
+            f.write("COPILOT USAGE DATA ANALYSIS SUMMARY\n")
         f.write("=" * 60 + "\n\n")
         
         f.write(f"Report Window: {report_start} to {report_end}\n")
@@ -994,18 +1015,12 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         
         f.write("--- Missing Users (in activity report but NOT in JSON) ---\n")
         f.write(f"Count: {stats['missing_count']:,}\n")
-        f.write("Breakdown by Surface Type:\n")
-        for surface, count in sorted(stats['missing_surface_breakdown'].items(), key=lambda x: -x[1]):
-            f.write(f"  {surface}: {count:,}\n")
         f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
         for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], stats['all_copilot_chat_versions']):
             f.write(f"  {ext}: {count:,}\n")
         
         f.write("\n--- Timestamp Mismatches (user in JSON but timestamp not found) ---\n")
         f.write(f"Count: {stats['timestamp_mismatch_count']:,}\n")
-        f.write("Breakdown by Surface Type:\n")
-        for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
-            f.write(f"  {surface}: {count:,}\n")
         f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
         for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], stats['all_copilot_chat_versions']):
             f.write(f"  {ext}: {count:,}\n")
@@ -1026,17 +1041,14 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
             gaps = patterns['timestamp_gaps']
             f.write(f"  JSON most recent is OLDER than report: {gaps['json_older']}\n")
             f.write(f"  JSON most recent is NEWER than report: {gaps['json_newer']}\n")
-            if gaps['gaps']:
-                avg_gap = sum(gaps['gaps']) / len(gaps['gaps'])
-                f.write(f"  Average gap: {avg_gap:.1f} days\n")
-                f.write(f"  Min gap: {min(gaps['gaps']):.1f} days\n")
-                f.write(f"  Max gap: {max(gaps['gaps']):.1f} days\n")
             
-            # By activity level
+            # By activity level - horizontal bar chart
             f.write("\n--- Discrepancy Rate by User Activity Level ---\n")
             f.write("(Activity = unique days with JSON timestamps in report window)\n\n")
             
             activity_users = patterns.get('activity_users_by_bucket', {})
+            bar_width = 40  # Width of the bar in characters
+            
             for bucket in ['0 days (missing)', '1-2 days', '3-5 days', '6-10 days', '11-20 days', '21+ days']:
                 data = patterns['by_activity_level'].get(bucket, {})
                 count = data.get('count', 0)
@@ -1045,19 +1057,20 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
                 
                 if total_in_bucket > 0:
                     rate = count / total_in_bucket * 100
-                    matched = total_in_bucket - count
-                    f.write(f"  {bucket}:\n")
-                    f.write(f"    Discrepancies: {count}/{total_in_bucket} ({rate:.1f}% gap rate)\n")
-                    f.write(f"    Matched: {matched}\n")
-                    if bucket_gaps:
-                        avg_gap = sum(bucket_gaps) / len(bucket_gaps)
-                        f.write(f"    Avg timestamp gap: {avg_gap:.1f} days\n")
+                    # Create horizontal bar (scale to 100%)
+                    filled = int(rate / 100 * bar_width)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    
+                    # Format the label to fixed width for alignment
+                    label = f"{bucket:17}"
+                    
+                    f.write(f"  {label} |{bar}| {rate:5.1f}% ({count}/{total_in_bucket})\n")
             
             # Key insights
             f.write("\n--- Key Insights ---\n")
             f.write("1. More active Copilot users have better data consistency between sources\n")
-            f.write("2. Users with 21+ active days have only ~4% discrepancy rate\n")
-            f.write("3. Infrequent users (1-2 days) have ~31% discrepancy rate\n")
+            f.write("2. Users with 21+ active days have near-zero discrepancy rate\n")
+            f.write("3. Infrequent users (1-2 days) have higher discrepancy rates\n")
             f.write("4. JSON export typically lags behind activity report timestamps\n")
     
     print(f"Wrote summary to {output_path}")
@@ -1112,11 +1125,16 @@ Examples:
     
     activity_report_path = csv_files[0]
     
+    # Extract customer name from CSV filename (e.g., "goldman-sachs-seat-activity-123.csv" -> "goldman-sachs")
+    csv_basename = os.path.basename(activity_report_path)
+    customer_name = csv_basename.split('-seat-activity')[0] if '-seat-activity' in csv_basename else 'unknown'
+    customer_name_display = customer_name.replace('-', ' ').title()  # e.g., "Goldman Sachs"
+    
     # Output files go in an 'output' subdirectory
     output_dir = os.path.join(args.data_dir, 'output')
     os.makedirs(output_dir, exist_ok=True)
     discrepancies_csv_path = os.path.join(output_dir, 'discrepancies.csv')
-    summary_path = os.path.join(output_dir, 'summary.txt')
+    summary_path = os.path.join(output_dir, f'{customer_name}-summary.txt')
     
     # Extract report generation date from activity report CSV
     report_generated_date = None
@@ -1196,11 +1214,11 @@ Examples:
     # Step 4: Write outputs
     print("\nStep 4: Writing output files...")
     write_discrepancies_csv(all_discrepancies, output_fieldnames, discrepancies_csv_path)
-    write_summary(stats, report_start, effective_end, len(distilled_users), summary_path, patterns)
+    write_summary(stats, report_start, effective_end, len(distilled_users), summary_path, patterns, customer_name_display)
     
     # Print summary to console
     print("\n" + "=" * 60)
-    print("SUMMARY")
+    print(f"{customer_name_display.upper()} - SUMMARY")
     print("=" * 60)
     print(f"Analysis Window: {report_start} to {effective_end} (96-hour buffer applied)")
     print(f"Unique users in JSON data: {len(distilled_users):,}")
@@ -1211,14 +1229,8 @@ Examples:
     print(f"\nTotal discrepancies: {total_discrepancies:,}")
     
     print(f"\n  Missing users (in activity report but NOT in JSON): {stats['missing_count']:,}")
-    print("  Breakdown by surface:")
-    for surface, count in sorted(stats['missing_surface_breakdown'].items(), key=lambda x: -x[1]):
-        print(f"    {surface}: {count:,}")
     
     print(f"\n  Timestamp mismatches (user in JSON but timestamp not found): {stats['timestamp_mismatch_count']:,}")
-    print("  Breakdown by surface:")
-    for surface, count in sorted(stats['timestamp_mismatch_surface_breakdown'].items(), key=lambda x: -x[1]):
-        print(f"    {surface}: {count:,}")
     
     # Print pattern insights
     print("\n" + "-" * 60)
@@ -1228,24 +1240,24 @@ Examples:
     # Timestamp gap analysis
     gaps = patterns['timestamp_gaps']
     if gaps['gaps']:
-        avg_gap = sum(gaps['gaps']) / len(gaps['gaps'])
         print(f"\nTimestamp Gap Analysis:")
         print(f"  JSON is older than report: {gaps['json_older']} ({gaps['json_older']/(gaps['json_older']+gaps['json_newer'])*100:.0f}%)")
         print(f"  JSON is newer than report: {gaps['json_newer']}")
-        print(f"  Average gap: {avg_gap:.1f} days")
     
-    # Activity level insights
+    # Activity level insights - horizontal bar chart
     print(f"\nDiscrepancy Rate by User Activity Level:")
     activity_users = patterns.get('activity_users_by_bucket', {})
+    bar_width = 30
     for bucket in ['0 days (missing)', '1-2 days', '3-5 days', '6-10 days', '11-20 days', '21+ days']:
         data = patterns['by_activity_level'].get(bucket, {})
         count = data.get('count', 0)
         total = activity_users.get(bucket, 0)
         if total > 0:
             rate = count / total * 100
-            bucket_gaps = data.get('gaps', [])
-            gap_str = f", avg gap: {sum(bucket_gaps)/len(bucket_gaps):.1f}d" if bucket_gaps else ""
-            print(f"  {bucket}: {rate:.1f}% gap rate ({count}/{total}){gap_str}")
+            filled = int(rate / 100 * bar_width)
+            empty = bar_width - filled
+            bar = '█' * filled + '░' * empty
+            print(f"  {bucket:17} |{bar}| {rate:5.1f}% ({count}/{total})")
     
     print("\nOutput files:")
     print(f"  - {discrepancies_csv_path}")
