@@ -536,7 +536,9 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
     stats = {
         'total_activity_users': 0,
         'users_with_activity': 0,
+        'users_active_before_window': 0,
         'users_active_in_window': 0,
+        'users_active_after_window': 0,
         'users_unsupported_version': 0,
         'missing_count': 0,
         'timestamp_mismatch_count': 0,
@@ -558,7 +560,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
             last_activity_at = row.get('Last Activity At', '')
             last_surface = row.get('Last Surface Used', '')
             
-            if last_activity_at:
+            # Check for actual activity (not "None" or empty)
+            if last_activity_at and last_activity_at.lower() != 'none':
                 stats['users_with_activity'] += 1
                 
                 try:
@@ -566,9 +569,15 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                     last_activity_dt = datetime.strptime(last_activity_date, '%Y-%m-%d')
                     
                     # Check if within report window
-                    if report_start_dt <= last_activity_dt <= report_end_dt:
+                    if last_activity_dt < report_start_dt:
+                        stats['users_active_before_window'] += 1
+                    elif last_activity_dt > report_end_dt:
+                        stats['users_active_after_window'] += 1
+                    else:
                         stats['users_active_in_window'] += 1
-                        
+                    
+                    # Only process users within the report window for discrepancy analysis
+                    if report_start_dt <= last_activity_dt <= report_end_dt:
                         # Track surface type
                         if last_surface:
                             parts = last_surface.split('/')
@@ -964,15 +973,17 @@ def write_discrepancies_csv(discrepancies, fieldnames, output_path):
     print(f"Wrote {len(discrepancies)} discrepancies to {output_path}")
 
 
-def write_summary(stats, report_start, report_end, distilled_users_count, output_path, patterns=None, customer_name=None):
+def write_summary(stats, report_start, report_end_original, report_end_analysis, distilled_users_count, distilled_users_analysis_count, output_path, patterns=None, customer_name=None):
     """
     Write summary statistics to a text file.
     
     Args:
         stats: Statistics dict
         report_start: Report start date
-        report_end: Report end date
-        distilled_users_count: Number of unique users in JSON data
+        report_end_original: Original report end date from JSON
+        report_end_analysis: Analysis end date (96 hours before activity report)
+        distilled_users_count: Number of unique users in original JSON window
+        distilled_users_analysis_count: Number of unique users in analysis window
         output_path: Path to output summary file
         patterns: Optional pattern analysis dict
         customer_name: Customer name for the report header
@@ -985,16 +996,31 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
             f.write("COPILOT USAGE DATA ANALYSIS SUMMARY\n")
         f.write("=" * 60 + "\n\n")
         
-        f.write(f"Report Window: {report_start} to {report_end}\n")
-        f.write(f"  (Excluding latest 96 hours - JSON export has a population delay)\n\n")
-        
-        f.write("--- JSON Usage Data ---\n")
-        f.write(f"Unique users in JSON data: {distilled_users_count:,}\n\n")
+        f.write("--- Dashboard JSON Report Window ---\n")
+        f.write(f"Original: {report_start} to {report_end_original}\n")
+        f.write(f"Trimmed:  {report_start} to {report_end_analysis} ← ANALYSIS\n\n")
+        f.write("NOTE: Trimmed 96 hours before activity report generation for analysis\n\n")
+        f.write(f"Unique users in original window: {distilled_users_count:,}\n")
+        f.write(f"Unique users in analysis window: {distilled_users_analysis_count:,} ← ANALYSIS\n\n")
         
         f.write("--- Activity Report ---\n")
-        f.write(f"Total users in activity report: {stats['total_activity_users']:,}\n")
-        f.write(f"Users with activity data: {stats['users_with_activity']:,}\n")
-        f.write(f"Users active within report window: {stats['users_active_in_window']:,}\n\n")
+        active_pct = (stats['users_with_activity'] / stats['total_activity_users'] * 100) if stats['total_activity_users'] > 0 else 0
+        f.write(f"% active users: {active_pct:.1f}% ({stats['users_with_activity']:,} / {stats['total_activity_users']:,})\n\n")
+        
+        total_active = stats['users_with_activity']
+        before_pct = (stats['users_active_before_window'] / total_active * 100) if total_active > 0 else 0
+        within_pct = (stats['users_active_in_window'] / total_active * 100) if total_active > 0 else 0
+        after_pct = (stats['users_active_after_window'] / total_active * 100) if total_active > 0 else 0
+        f.write(f"% active before JSON report window: {before_pct:.1f}% ({stats['users_active_before_window']:,} / {total_active:,})\n")
+        f.write(f"% active within JSON report window: {within_pct:.1f}% ({stats['users_active_in_window']:,} / {total_active:,}) ← ANALYSIS\n")
+        f.write(f"% active after JSON report window: {after_pct:.1f}% ({stats['users_active_after_window']:,} / {total_active:,})\n\n")
+        
+        # Determine if majority/plurality is outside analysis window
+        if within_pct < before_pct or within_pct < after_pct:
+            if before_pct > after_pct:
+                f.write("NOTE: Scope of analysis is limited as majority of active users fall outside of analysis window (before)\n\n")
+            else:
+                f.write("NOTE: Scope of analysis is limited as majority of active users fall outside of analysis window (after)\n\n")
         
         # Calculate total discrepancies and affected user percentage
         # Use total users with activity (not just window) since 96-hour buffer excludes recent active users
@@ -1009,21 +1035,21 @@ def write_summary(stats, report_start, report_end, distilled_users_count, output
         
         f.write("--- Impact Summary ---\n")
         f.write(f"Total discrepancies: {total_discrepancies:,}\n")
-        f.write(f"Total active user base affected: >{affected_pct:.1f}% ({total_discrepancies:,} of {stats['users_with_activity']:,} users with activity)\n")
-        f.write(f"  Note: Actual % likely higher - 96-hour buffer excludes recently active users from analysis\n")
-        f.write(f"VS Code share of issues: {vscode_pct:.1f}% ({vscode_total:,} of {total_discrepancies:,} discrepancies)\n\n")
+        f.write(f"+ Absent data: {stats['missing_count']:,}\n")
+        f.write(f"+ Stale data: {stats['timestamp_mismatch_count']:,}\n\n")
+        f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n\n")
+        f.write(f"% active users affected: {affected_pct:.1f}% ({total_discrepancies:,} / {stats['users_with_activity']:,})\n")
+        f.write(f"% issues from VS Code: {vscode_pct:.1f}% ({vscode_total:,} / {total_discrepancies:,})\n\n")
         
-        f.write("--- Missing Users (in activity report but NOT in JSON) ---\n")
-        f.write(f"Count: {stats['missing_count']:,}\n")
-        f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
+        f.write("--- Absent Data ---\n")
+        f.write(f"Total: {stats['missing_count']:,}\n")
         for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], stats['all_copilot_chat_versions']):
-            f.write(f"  {ext}: {count:,}\n")
+            f.write(f"+ {ext}: {count:,}\n")
         
-        f.write("\n--- Timestamp Mismatches (user in JSON but timestamp not found) ---\n")
-        f.write(f"Count: {stats['timestamp_mismatch_count']:,}\n")
-        f.write("Breakdown by copilot-chat Version (reverse chronological):\n")
+        f.write("\n--- Stale Data ---\n")
+        f.write(f"Total: {stats['timestamp_mismatch_count']:,}\n")
         for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], stats['all_copilot_chat_versions']):
-            f.write(f"  {ext}: {count:,}\n")
+            f.write(f"+ {ext}: {count:,}\n")
         
         # Add pattern analysis if available
         if patterns:
@@ -1187,9 +1213,17 @@ Examples:
     print(f"Effective analysis window: {report_start} to {effective_end}")
     print(f"Total records extracted: {len(rows):,}")
     
-    # Get unique users count
+    # Get unique users count (original window)
     distilled_users = set(row['user_login'] for row in rows)
     print(f"Unique users in JSON data: {len(distilled_users):,}")
+    
+    # Get unique users in analysis window (before effective_end)
+    effective_end_dt = datetime.strptime(effective_end, '%Y-%m-%d')
+    distilled_users_analysis = set(
+        row['user_login'] for row in rows 
+        if datetime.strptime(row['day'], '%Y-%m-%d') <= effective_end_dt
+    )
+    print(f"Unique users in analysis window: {len(distilled_users_analysis):,}")
     
     # Step 2: Find discrepancies (using effective_end as the cutoff)
     print("\nStep 2: Finding discrepancies with activity report...")
@@ -1214,7 +1248,7 @@ Examples:
     # Step 4: Write outputs
     print("\nStep 4: Writing output files...")
     write_discrepancies_csv(all_discrepancies, output_fieldnames, discrepancies_csv_path)
-    write_summary(stats, report_start, effective_end, len(distilled_users), summary_path, patterns, customer_name_display)
+    write_summary(stats, report_start, report_end, effective_end, len(distilled_users), len(distilled_users_analysis), summary_path, patterns, customer_name_display)
     
     # Print summary to console
     print("\n" + "=" * 60)
