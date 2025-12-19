@@ -9,11 +9,10 @@ This tool helps GitHub Enterprise administrators identify inconsistencies betwee
 1. **Copilot Usage API Data** - Detailed per-user, per-timestamp usage records exported as JSON
 2. **Seat Activity Reports** - CSV exports showing last activity timestamps per user
 
-The script detects three types of discrepancies:
+The script detects two types of discrepancies:
 
-- **Missing Users**: Users who appear in the seat activity report (with activity within the report window) but have no corresponding records in the usage API data
-- **Timestamp Mismatches**: Users who appear in both sources, but their "Last Activity At" timestamp from the activity report does not match (within 24 hours) any timestamp in the JSON data
-- **IDE Mismatches**: Users where the timestamp matches exactly, but the IDE/surface differs between sources
+- **Absent Users**: Users who appear in the seat activity report (with activity within the report window, on supported versions) but have no corresponding records in the usage API data
+- **Stale Users**: Users who appear in both sources, but their "Last Activity At" timestamp from the activity report is >24 hours different from any timestamp in the JSON data
 
 ## 96-Hour Buffer
 
@@ -21,6 +20,16 @@ The script automatically applies a 96-hour buffer to the analysis window because
 - The Copilot usage JSON export has a known delay before data populates
 - Activity from the last 96 hours may not yet appear in the JSON export
 - This reduces false positives from timing delays
+
+## Supported Version Filtering
+
+The script automatically filters out users on unsupported IDE/extension versions that are not expected to appear in the JSON export:
+
+- **VS Code**: Requires VS Code 1.101+ and copilot-chat 0.28.0+
+- **JetBrains**: Requires build 242+ (2024.2.x) and copilot-intellij 1.5.52+
+- **Visual Studio**: Requires VS 17.14.13+ and extension 18.0.471+
+
+Users on older versions are excluded from discrepancy analysis since they won't appear in the JSON export by design.
 
 ## Requirements
 
@@ -66,7 +75,7 @@ cp seat-activity.csv my-analysis/
 python3 analyze_copilot_data.py --data-dir ./my-analysis
 
 # View results (output is in the 'output' subdirectory)
-cat my-analysis/output/summary.txt
+cat my-analysis/output/*-summary.md
 ```
 
 ## Input Data Formats
@@ -107,7 +116,7 @@ The activity report CSV should contain these columns:
 | `Login` | GitHub username |
 | `Last Authenticated At` | Last authentication timestamp |
 | `Last Activity At` | Last Copilot activity timestamp |
-| `Last Surface Used` | IDE/editor where activity occurred (e.g., `vscode/1.85.0`) |
+| `Last Surface Used` | IDE/editor where activity occurred (e.g., `vscode/1.85.0/copilot-chat/0.29.1`) |
 
 ## Output Files
 
@@ -118,25 +127,29 @@ Contains all users with discrepancies, including:
 | Column | Description |
 |--------|-------------|
 | `Login` | GitHub username |
+| `Status` | `Missing from JSON` (absent) or `Timestamp Mismatch` (stale) |
 | `Last Activity At` | Timestamp from activity report |
-| `Last Surface Used` | IDE/surface from activity report |
-| `JSON Timestamps` | Comma-separated list of timestamps found in JSON |
-| `Latest JSON Timestamp` | Most recent timestamp from JSON (empty for missing users) |
-| `JSON IDE/Version` | IDE info from JSON on exact match (for IDE mismatch analysis) |
-| `Issue` | `missing_from_json`, `timestamp_mismatch`, or `ide_mismatch` |
+| `Latest Export Activity` | Most recent timestamp from JSON (empty for absent users) |
+| `Report Surface` | IDE/surface from activity report |
+| `JSON IDE` | IDE from JSON data |
+| `Report Generated` | When the activity report was generated |
 
-### summary.txt
+### {customer}-summary.md
 
-A comprehensive text file containing:
-- Report window dates (with 96-hour buffer applied)
-- User counts from each data source
-- Breakdown of discrepancies by type and surface/IDE
-- Pattern analysis:
-  - Discrepancies by date
-  - Discrepancies by day of week
+A comprehensive Markdown report containing:
+
+- **Dashboard JSON**: Report window dates with 96-hour buffer applied
+- **Activity Report**: User counts and version support breakdown
+- **Analysis**:
+  - % active users affected
+  - % of events missing (absent vs stale breakdown)
+  - IDE breakdown (VS Code vs JetBrains with absent/stale rates)
+- **Patterns**:
+  - Absent/Stale events by extension version
+  - Discrepancies by date (ASCII chart)
   - Timestamp gap analysis
-  - Discrepancy rate by user activity level
-- Key insights about data consistency
+  - Interaction count distributions
+  - Discrepancy rate by activity level
 
 ## How It Works
 
@@ -144,22 +157,22 @@ A comprehensive text file containing:
 
 2. **Extract Report Window**: Determines the report date range from the JSON data, then applies a 96-hour buffer to exclude recent activity that may not have populated yet.
 
-3. **Analyze Activity Report**: For each user in the CSV with a "Last Activity At" timestamp within the effective report window:
-   - If the user is not found in the JSON data → `missing_from_json`
-   - If the user is found but their timestamp doesn't match within 24 hours → `timestamp_mismatch`
-   - If the timestamp matches exactly but the IDE differs → `ide_mismatch`
+3. **Filter Unsupported Versions**: Excludes users on IDE/extension versions that don't support usage metrics export.
 
-4. **Pattern Analysis**: Analyzes discrepancy patterns by date, day of week, and user activity level to identify systemic issues.
+4. **Analyze Activity Report**: For each user in the CSV with a "Last Activity At" timestamp within the effective report window:
+   - If the user is not found in the JSON data → `absent`
+   - If the user is found but their timestamp doesn't match within 24 hours → `stale`
 
-5. **Generate Output**: Writes detailed discrepancies to CSV and a comprehensive summary to a text file.
+5. **Pattern Analysis**: Analyzes discrepancy patterns by date, IDE, extension version, and user activity level to identify systemic issues.
+
+6. **Generate Output**: Writes detailed discrepancies to CSV and a comprehensive summary to Markdown.
 
 ## IDE Matching Logic
 
-The script uses intelligent IDE matching to reduce false positives:
+The script uses intelligent IDE matching:
 
-- **JetBrains normalization**: All JetBrains IDEs (`JetBrains-IU`, `JetBrains-PY`, etc.) map to `intellij` (what the JSON reports)
-- **Version comparison**: Checks if the major version number matches
-- **Plugin tolerance**: Allows matches where JSON is missing plugin version info
+- **JetBrains normalization**: All JetBrains IDEs (`JetBrains-IU`, `JetBrains-PY`, etc.) map to `intellij`
+- **Unknown surface handling**: `unknown/GitHubCopilotChat/*` patterns are recognized as VS Code
 - **Neovim exclusion**: Skips Neovim users (not expected in JSON export)
 
 ## License
