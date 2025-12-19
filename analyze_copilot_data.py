@@ -1077,16 +1077,59 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         
         f.write("\n## Analysis\n\n")
         
+        f.write(f"- % active users affected: **{affected_pct:.1f}%** ({total_discrepancies:,} / {stats['users_with_activity']:,})\n")
+        
         if supported_in_window > 0:
             events_missing_pct = (total_discrepancies / supported_in_window * 100)
             absent_pct = (stats['missing_count'] / supported_in_window * 100)
             stale_pct = (stats['timestamp_mismatch_count'] / supported_in_window * 100)
-            f.write(f"- % of events missing: **{events_missing_pct:.1f}%** ({total_discrepancies:,} / {supported_in_window:,})\n")
+            f.write(f"\n- % of events missing: **{events_missing_pct:.1f}%** ({total_discrepancies:,} / {supported_in_window:,})\n")
             f.write(f"  - % absent: {absent_pct:.1f}% ({stats['missing_count']:,} / {supported_in_window:,})\n")
             f.write(f"  - % stale: {stale_pct:.1f}% ({stats['timestamp_mismatch_count']:,} / {supported_in_window:,})\n\n")
-            f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n\n")
-        f.write(f"- % active users affected: **{affected_pct:.1f}%** ({total_discrepancies:,} / {stats['users_with_activity']:,})\n")
-        f.write(f"\n- % issues from VS Code: **{vscode_pct:.1f}%** ({vscode_total:,} / {total_discrepancies:,})\n")
+            f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n")
+        
+        # Normalize surface names to IDE categories
+        ide_categories = {
+            'vscode': 'VS Code',
+            'intellij': 'JetBrains',
+            'jetbrains-iu': 'JetBrains',
+            'jetbrains-py': 'JetBrains',
+            'jetbrains-pc': 'JetBrains',
+            'jetbrains-ws': 'JetBrains',
+            'jetbrains-go': 'JetBrains',
+            'jetbrains-rm': 'JetBrains',
+            'jetbrains-cl': 'JetBrains',
+            'jetbrains-rd': 'JetBrains',
+            'jetbrains-jbc': 'JetBrains',
+            'jetbrains-ai': 'JetBrains',
+            'jetbrains-ic': 'JetBrains',
+            'visualstudio': 'Visual Studio',
+        }
+        
+        ide_stats = defaultdict(lambda: {'absent': 0, 'stale': 0})
+        for surface, count in stats['missing_surface_breakdown'].items():
+            ide = ide_categories.get(surface.lower(), 'Other')
+            ide_stats[ide]['absent'] += count
+        for surface, count in stats['timestamp_mismatch_surface_breakdown'].items():
+            ide = ide_categories.get(surface.lower(), 'Other')
+            ide_stats[ide]['stale'] += count
+        
+        # Add IDE breakdown section
+        f.write("\n### IDEs\n\n")
+        
+        # Sort by total descending, but ensure VS Code and JetBrains come first
+        sorted_ides = sorted(ide_stats.items(), key=lambda x: x[1]['absent'] + x[1]['stale'], reverse=True)
+        for ide, counts in sorted_ides:
+            absent = counts['absent']
+            stale = counts['stale']
+            total = absent + stale
+            if total > 0:
+                pct_of_total = total / total_discrepancies * 100 if total_discrepancies > 0 else 0
+                pct_absent = absent / total * 100
+                pct_stale = stale / total * 100
+                f.write(f"- % issues from {ide}: **{pct_of_total:.1f}%** ({total:,} / {total_discrepancies:,})\n")
+                f.write(f"  - % absent: {pct_absent:.1f}% ({absent:,} / {total:,})\n")
+                f.write(f"  - % stale: {pct_stale:.1f}% ({stale:,} / {total:,})\n")
         
         f.write("\n### Patterns\n\n")
         f.write("#### Absent Events\n\n")
