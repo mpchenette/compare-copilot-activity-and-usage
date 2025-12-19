@@ -67,12 +67,26 @@ SURFACE_TO_JSON_IDE = {
     'unknown': 'unknown',
 }
 
-# Mapping for plugin names (activity report -> JSON)
-# Empty - keep plugin names as-is since copilot-chat and copilot are different extensions
-PLUGIN_NAME_MAP = {}
-
 # Pattern for VS Code Copilot extension versions (0.XX.X format)
 VSCODE_VERSION_PATTERN = re.compile(r'^0\.\d{1,2}\.\d+$')
+
+# IDE categories for grouping surfaces in reports
+IDE_CATEGORIES = {
+    'vscode': 'VS Code',
+    'intellij': 'JetBrains',
+    'jetbrains-iu': 'JetBrains',
+    'jetbrains-py': 'JetBrains',
+    'jetbrains-pc': 'JetBrains',
+    'jetbrains-ws': 'JetBrains',
+    'jetbrains-go': 'JetBrains',
+    'jetbrains-rm': 'JetBrains',
+    'jetbrains-cl': 'JetBrains',
+    'jetbrains-rd': 'JetBrains',
+    'jetbrains-jbc': 'JetBrains',
+    'jetbrains-ai': 'JetBrains',
+    'jetbrains-ic': 'JetBrains',
+    'visualstudio': 'Visual Studio',
+}
 
 # Minimum supported versions for Copilot usage metrics
 # Users on older versions will NOT appear in the JSON export by design
@@ -116,15 +130,7 @@ COPILOT_CHAT_VERSIONS = [
 
 
 def parse_version(version_str):
-    """
-    Parse a version string into a tuple of integers for comparison.
-    
-    Args:
-        version_str: Version string like '1.101.2' or '2024.2.6'
-        
-    Returns:
-        Tuple of integers, e.g., (1, 101, 2), or None if parsing fails
-    """
+    """Parse a version string into a tuple of integers for comparison."""
     if not version_str:
         return None
     # Extract numeric parts only
@@ -136,19 +142,7 @@ def parse_version(version_str):
 
 
 def is_version_supported(surface_str):
-    """
-    Check if the IDE/extension version from the activity report meets minimum requirements.
-    
-    Args:
-        surface_str: Surface string from activity report, e.g., 
-                     'vscode/1.104.3/copilot-chat/0.31.5'
-                     'JetBrains-IU/243.22562.145/copilot-intellij/1.5.32.8521'
-        
-    Returns:
-        Tuple of (is_supported, reason)
-        - is_supported: True if version meets minimum requirements
-        - reason: String explaining why not supported, or None if supported
-    """
+    """Check if IDE/extension version meets minimum requirements. Returns (is_supported, reason)."""
     if not surface_str:
         return False, "No surface info"
     
@@ -225,15 +219,7 @@ def is_version_supported(surface_str):
 
 
 def normalize_timestamp(ts):
-    """
-    Normalize a timestamp by removing milliseconds for comparison.
-    
-    Args:
-        ts: ISO timestamp string (e.g., '2025-12-13T11:35:21.5230000Z')
-        
-    Returns:
-        Normalized timestamp without milliseconds (e.g., '2025-12-13T11:35:21Z')
-    """
+    """Normalize a timestamp by removing milliseconds."""
     if not ts:
         return None
     # Remove milliseconds (.XXXXXXX) if present
@@ -243,20 +229,7 @@ def normalize_timestamp(ts):
 
 
 def find_closest_timestamp(report_ts, json_timestamps, tolerance_hours=1):
-    """
-    Find the closest JSON timestamp to the report timestamp.
-    
-    Args:
-        report_ts: Normalized timestamp from activity report (e.g., '2025-12-13T11:35:21Z')
-        json_timestamps: Set of normalized timestamps from JSON
-        tolerance_hours: Maximum hours difference to consider a match (default 1)
-        
-    Returns:
-        Tuple of (closest_timestamp, is_within_tolerance, time_diff_seconds)
-        - closest_timestamp: The closest JSON timestamp, or None if no timestamps
-        - is_within_tolerance: True if within tolerance_hours
-        - time_diff_seconds: Absolute difference in seconds (positive = JSON is later)
-    """
+    """Find the closest JSON timestamp to the report timestamp. Returns (closest_ts, within_tolerance, time_diff)."""
     if not report_ts or not json_timestamps:
         return None, False, None
     
@@ -291,19 +264,7 @@ def find_closest_timestamp(report_ts, json_timestamps, tolerance_hours=1):
 
 
 def normalize_surface_to_json_format(last_surface):
-    """
-    Convert an activity report surface string to the JSON format for comparison.
-    
-    Activity report format: surface/ide_version/plugin/plugin_version
-    JSON format: ide/ide_version/plugin/plugin_version
-    
-    Args:
-        last_surface: Full surface string from activity report 
-                      (e.g., 'JetBrains-IU/252.25557.131/copilot-intellij/1.5.57-243')
-        
-    Returns:
-        Normalized string in JSON format, or None if can't be normalized
-    """
+    """Convert an activity report surface string to JSON format for comparison."""
     if not last_surface:
         return None
     
@@ -327,73 +288,12 @@ def normalize_surface_to_json_format(last_surface):
     normalized_parts = [json_ide]
     
     # Add remaining parts (ide_version, plugin, plugin_version)
-    for i, part in enumerate(parts[1:], 1):
+    for part in parts[1:]:
         # Skip 'GitHubCopilotChat' or similar intermediate identifiers
-        if part.lower() in ('githubcopilotchat', 'githubcopilot'):
-            continue
-        # Map plugin names if this looks like a plugin name
-        if part.lower() in PLUGIN_NAME_MAP:
-            normalized_parts.append(PLUGIN_NAME_MAP[part.lower()])
-        else:
+        if part.lower() not in ('githubcopilotchat', 'githubcopilot'):
             normalized_parts.append(part)
     
     return '/'.join(normalized_parts)
-
-
-def ide_matches_partial(report_surface, json_ide):
-    """
-    Check if two IDE strings match, allowing for partial matches.
-    
-    A partial match means the IDE name and version match, even if one
-    has additional plugin info that the other lacks.
-    
-    Examples that should match:
-        - 'JetBrains-IU/233.15026.9/' and 'intellij/233.15026.9/copilot-intellij/1.5.8.5775'
-        - 'vscode/1.105.1/' and 'vscode/1.105.1/copilot/1.387.0'
-    
-    Args:
-        report_surface: Surface string from activity report
-        json_ide: IDE string from JSON export
-        
-    Returns:
-        True if IDE name and version match (partial match allowed)
-    """
-    if not report_surface or not json_ide:
-        return False
-    
-    # Parse both into parts
-    report_parts = report_surface.lower().split('/')
-    json_parts = json_ide.lower().split('/')
-    
-    if len(report_parts) < 1 or len(json_parts) < 1:
-        return False
-    
-    # Get IDE names
-    report_ide = report_parts[0]
-    json_ide_name = json_parts[0]
-    
-    # Normalize report IDE name to JSON format
-    report_ide_normalized = SURFACE_TO_JSON_IDE.get(report_ide, report_ide)
-    
-    # Check if IDE names match
-    if report_ide_normalized != json_ide_name:
-        return False
-    
-    # Get versions (second part if available)
-    report_version = report_parts[1] if len(report_parts) > 1 else ''
-    json_version = json_parts[1] if len(json_parts) > 1 else ''
-    
-    # Strip trailing empty parts
-    report_version = report_version.strip()
-    json_version = json_version.strip()
-    
-    # If both have versions, they must match
-    if report_version and json_version:
-        return report_version == json_version
-    
-    # If only one has a version, still consider it a match (partial)
-    # This handles cases where one source has more detail than the other
-    return True
 
 
 def parse_json_files(json_files):
@@ -724,28 +624,15 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
 def analyze_patterns(discrepancies, user_timestamps, user_interactions, activity_report_path, report_start, report_end):
     """
     Analyze patterns in discrepancies by date, day of week, hour, and user activity level.
-    
-    Args:
-        discrepancies: List of discrepancy dicts
-        user_timestamps: Dict mapping user_login -> dict with timestamps info
-        user_interactions: Dict mapping user_login -> total interaction count
-        activity_report_path: Path to activity report CSV
-        report_start: Report start date
-        report_end: Report end date
-        
-    Returns:
-        Dict containing pattern analysis results
     """
-    from datetime import datetime
-    
     patterns = {
         'by_date': defaultdict(lambda: {'Missing': 0, 'Timestamp': 0, 'IDE': 0}),
         'by_day_of_week': defaultdict(int),
         'by_hour': defaultdict(int),
         'by_activity_level': {},
         'timestamp_gaps': {'json_older': 0, 'json_newer': 0, 'gaps': []},
-        'stale_user_interactions': [],  # Interaction counts for stale/timestamp mismatch users
-        'healthy_user_interactions': [],  # Interaction counts for users with no discrepancy
+        'stale_user_interactions': [],
+        'healthy_user_interactions': [],
     }
     
     dow_names = ['Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat', 'Sun']
@@ -1088,36 +975,19 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
             f.write(f"  - % stale: {stale_pct:.1f}% ({stats['timestamp_mismatch_count']:,} / {supported_in_window:,})\n\n")
             f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n")
         
-        # Normalize surface names to IDE categories
-        ide_categories = {
-            'vscode': 'VS Code',
-            'intellij': 'JetBrains',
-            'jetbrains-iu': 'JetBrains',
-            'jetbrains-py': 'JetBrains',
-            'jetbrains-pc': 'JetBrains',
-            'jetbrains-ws': 'JetBrains',
-            'jetbrains-go': 'JetBrains',
-            'jetbrains-rm': 'JetBrains',
-            'jetbrains-cl': 'JetBrains',
-            'jetbrains-rd': 'JetBrains',
-            'jetbrains-jbc': 'JetBrains',
-            'jetbrains-ai': 'JetBrains',
-            'jetbrains-ic': 'JetBrains',
-            'visualstudio': 'Visual Studio',
-        }
-        
+        # Build IDE stats using global IDE_CATEGORIES constant
         ide_stats = defaultdict(lambda: {'absent': 0, 'stale': 0})
         for surface, count in stats['missing_surface_breakdown'].items():
-            ide = ide_categories.get(surface.lower(), 'Other')
+            ide = IDE_CATEGORIES.get(surface.lower(), 'Other')
             ide_stats[ide]['absent'] += count
         for surface, count in stats['timestamp_mismatch_surface_breakdown'].items():
-            ide = ide_categories.get(surface.lower(), 'Other')
+            ide = IDE_CATEGORIES.get(surface.lower(), 'Other')
             ide_stats[ide]['stale'] += count
         
         # Add IDE breakdown section
         f.write("\n### IDEs\n\n")
         
-        # Sort by total descending, but ensure VS Code and JetBrains come first
+        # Sort by total descending
         sorted_ides = sorted(ide_stats.items(), key=lambda x: x[1]['absent'] + x[1]['stale'], reverse=True)
         for ide, counts in sorted_ides:
             absent = counts['absent']
