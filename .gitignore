@@ -5,6 +5,8 @@
 *.json
 *.csv
 *.txt
+*-data-*/
+__pycache__/
 
 # Output directory
 analysis-output/

@@ -16,7 +16,7 @@ Usage:
 
 Output Files:
     - discrepancies.csv: Users with discrepancies (missing from JSON or date mismatches)
-    - summary.txt: Summary statistics of the analysis
+    - summary.md: Summary statistics of the analysis
 """
 
 import json
@@ -87,7 +87,10 @@ MIN_VERSIONS = {
         'extension': (18, 0, 471),  # 18.0.471.29466
     },
     'jetbrains': {
-        'ide': (2024, 2, 6),        # JetBrains 2024.2.6
+        # JetBrains 2024.2.6 = build 242.xxxxx
+        # Build number format: YYR.xxxxx where YY=year-2000, R=release (1,2,3)
+        # 2024.2.x → 242.xxxxx, 2024.3.x → 243.xxxxx, 2025.1.x → 251.xxxxx
+        'ide_build': 242,           # JetBrains 2024.2.x (build 242.xxxxx)
         'extension': (1, 5, 52),    # 1.5.52-241
     },
     'eclipse': {
@@ -185,15 +188,26 @@ def is_version_supported(surface_str):
     if not ide_version:
         return False, f"Cannot parse IDE version: {ide_version_str}"
     
-    # Check IDE version
-    min_ide = min_ver.get('ide')
-    if min_ide:
-        # Pad versions to same length for comparison
-        ide_padded = ide_version + (0,) * (len(min_ide) - len(ide_version))
-        min_padded = min_ide + (0,) * (len(ide_version) - len(min_ide))
-        
-        if ide_padded[:len(min_ide)] < min_ide:
-            return False, f"IDE version {ide_version_str} < minimum {'.'.join(map(str, min_ide))}"
+    # Check IDE version - special handling for JetBrains build numbers
+    if ide_type == 'jetbrains':
+        # JetBrains uses build numbers like 242.xxxxx, 243.xxxxx, 251.xxxxx
+        # Format: YYR.xxxxx where YY=year-2000, R=release (1,2,3)
+        # 2024.2.x → 242.xxxxx, 2024.3.x → 243.xxxxx, 2025.1.x → 251.xxxxx
+        min_build = min_ver.get('ide_build')
+        if min_build and ide_version:
+            build_prefix = ide_version[0]  # e.g., 242, 243, 251
+            if build_prefix < min_build:
+                return False, f"IDE build {ide_version_str} < minimum build {min_build}.x"
+    else:
+        # Standard version comparison for other IDEs
+        min_ide = min_ver.get('ide')
+        if min_ide:
+            # Pad versions to same length for comparison
+            ide_padded = ide_version + (0,) * (len(min_ide) - len(ide_version))
+            min_padded = min_ide + (0,) * (len(ide_version) - len(min_ide))
+            
+            if ide_padded[:len(min_ide)] < min_ide:
+                return False, f"IDE version {ide_version_str} < minimum {'.'.join(map(str, min_ide))}"
     
     # Check extension version if available
     if ext_version_str:
@@ -1004,21 +1018,20 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         customer_name: Customer name for the report header
     """
     with open(output_path, 'w') as f:
-        f.write("=" * 60 + "\n")
         if customer_name:
-            f.write(f"{customer_name.upper()} - COPILOT USAGE DATA ANALYSIS\n")
+            f.write(f"# {customer_name.upper()} - COPILOT USAGE DATA ANALYSIS\n\n")
         else:
-            f.write("COPILOT USAGE DATA ANALYSIS SUMMARY\n")
-        f.write("=" * 60 + "\n\n")
+            f.write("# COPILOT USAGE DATA ANALYSIS SUMMARY\n\n")
         
-        f.write("--- Dashboard JSON Report Window ---\n")
-        f.write(f"Original: {report_start} to {report_end_original}\n")
-        f.write(f"Trimmed:  {report_start} to {report_end_analysis} ← ANALYSIS\n\n")
+        f.write("## Dashboard JSON\n\n")
+        f.write("### Report Window\n\n")
+        f.write(f"- Original: {report_start} to {report_end_original}\n")
+        f.write(f"- Trimmed: **{report_start} to {report_end_analysis}** ← ANALYSIS\n\n")
         f.write("NOTE: Trimmed 96 hours before activity report generation for analysis\n\n")
-        f.write(f"Unique users in original window: {distilled_users_count:,}\n")
-        f.write(f"Unique users in analysis window: {distilled_users_analysis_count:,} ← ANALYSIS\n\n")
+        f.write(f"- Unique users in original window: **{distilled_users_count:,}**\n")
+        f.write(f"- Unique users in analysis window: **{distilled_users_analysis_count:,}** ← ANALYSIS\n")
         
-        f.write("--- Activity Report ---\n")
+        f.write("\n## Activity Report\n\n")
         active_pct = (stats['users_with_activity'] / stats['total_activity_users'] * 100) if stats['total_activity_users'] > 0 else 0
         f.write(f"% active users: {active_pct:.1f}% ({stats['users_with_activity']:,} / {stats['total_activity_users']:,})\n\n")
         
@@ -1026,9 +1039,9 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         before_pct = (stats['users_active_before_window'] / total_active * 100) if total_active > 0 else 0
         within_pct = (stats['users_active_in_window'] / total_active * 100) if total_active > 0 else 0
         after_pct = (stats['users_active_after_window'] / total_active * 100) if total_active > 0 else 0
-        f.write(f"% active before JSON report window: {before_pct:.1f}% ({stats['users_active_before_window']:,} / {total_active:,})\n")
-        f.write(f"% active within JSON report window: {within_pct:.1f}% ({stats['users_active_in_window']:,} / {total_active:,}) ← ANALYSIS\n")
-        f.write(f"% active after JSON report window: {after_pct:.1f}% ({stats['users_active_after_window']:,} / {total_active:,})\n\n")
+        f.write(f"- % active before JSON report window: {before_pct:.1f}% ({stats['users_active_before_window']:,} / {total_active:,})\n")
+        f.write(f"- % active within JSON report window: {within_pct:.1f}% ({stats['users_active_in_window']:,} / {total_active:,}) ← ANALYSIS\n")
+        f.write(f"- % active after JSON report window: {after_pct:.1f}% ({stats['users_active_after_window']:,} / {total_active:,})\n\n")
         
         # Determine if majority/plurality is outside analysis window
         if within_pct < before_pct or within_pct < after_pct:
@@ -1036,6 +1049,16 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
                 f.write("NOTE: Scope of analysis is limited as majority of active users fall outside of analysis window (before)\n\n")
             else:
                 f.write("NOTE: Scope of analysis is limited as majority of active users fall outside of analysis window (after)\n\n")
+        
+        # Supported vs unsupported version breakdown for users in analysis window
+        users_in_window = stats['users_active_in_window']
+        unsupported_count = stats.get('users_unsupported_version', 0)
+        supported_count = users_in_window - unsupported_count
+        if users_in_window > 0:
+            unsupported_pct = (unsupported_count / users_in_window * 100)
+            supported_pct = (supported_count / users_in_window * 100)
+            f.write(f"- % of analysis users on unsupported versions: {unsupported_pct:.1f}% ({unsupported_count:,} / {users_in_window:,})\n")
+            f.write(f"- % of analysis users on supported versions: **{supported_pct:.1f}%** ({supported_count:,} / {users_in_window:,}) ← ANALYSIS\n")
         
         # Calculate total discrepancies and affected user percentage
         # Use total users with activity (not just window) since 96-hour buffer excludes recent active users
@@ -1048,70 +1071,56 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         vscode_total = vscode_missing + vscode_timestamp
         vscode_pct = (vscode_total / total_discrepancies * 100) if total_discrepancies > 0 else 0
         
-        f.write("--- Impact Summary ---\n")
-        f.write(f"Total discrepancies: {total_discrepancies:,}\n")
-        f.write(f"+ Absent data: {stats['missing_count']:,}\n")
-        f.write(f"+ Stale data: {stats['timestamp_mismatch_count']:,}\n\n")
-        f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n\n")
-        f.write(f"% active users affected: {affected_pct:.1f}% ({total_discrepancies:,} / {stats['users_with_activity']:,})\n")
-        f.write(f"% issues from VS Code: {vscode_pct:.1f}% ({vscode_total:,} / {total_discrepancies:,})\n\n")
+        # Calculate supported users for event missing percentages
+        unsupported_in_window = stats.get('users_unsupported_version', 0)
+        supported_in_window = stats['users_active_in_window'] - unsupported_in_window
         
-        f.write("--- Absent Data ---\n")
-        f.write(f"Total: {stats['missing_count']:,}\n")
+        f.write("\n## Analysis\n\n")
+        
+        if supported_in_window > 0:
+            events_missing_pct = (total_discrepancies / supported_in_window * 100)
+            absent_pct = (stats['missing_count'] / supported_in_window * 100)
+            stale_pct = (stats['timestamp_mismatch_count'] / supported_in_window * 100)
+            f.write(f"- % of events missing: **{events_missing_pct:.1f}%** ({total_discrepancies:,} / {supported_in_window:,})\n")
+            f.write(f"  - % absent: {absent_pct:.1f}% ({stats['missing_count']:,} / {supported_in_window:,})\n")
+            f.write(f"  - % stale: {stale_pct:.1f}% ({stats['timestamp_mismatch_count']:,} / {supported_in_window:,})\n\n")
+            f.write("NOTE: Stale meaning >24 hours between activity report data and dashboard JSON data\n\n")
+        f.write(f"- % active users affected: **{affected_pct:.1f}%** ({total_discrepancies:,} / {stats['users_with_activity']:,})\n")
+        f.write(f"\n- % issues from VS Code: **{vscode_pct:.1f}%** ({vscode_total:,} / {total_discrepancies:,})\n")
+        
+        f.write("\n### Patterns\n\n")
+        f.write("#### Absent Events\n\n")
         for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], stats['all_copilot_chat_versions']):
-            f.write(f"+ {ext}: {count:,}\n")
+            f.write(f"- {ext}: {count:,}\n")
         
-        f.write("\n--- Stale Data ---\n")
-        f.write(f"Total: {stats['timestamp_mismatch_count']:,}\n")
+        f.write("\n#### Stale Events\n\n")
         for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], stats['all_copilot_chat_versions']):
-            f.write(f"+ {ext}: {count:,}\n")
+            f.write(f"- {ext}: {count:,}\n")
         
         # Add pattern analysis if available
         if patterns:
-            f.write("\n" + "=" * 60 + "\n")
-            f.write("PATTERN ANALYSIS\n")
-            f.write("=" * 60 + "\n")
             
             # By date - ASCII line graph
-            f.write("\n--- Discrepancies by Date (ASCII Graph) ---\n")
+            f.write("\n#### Discrepancies by Date\n\n")
+            f.write("```\n")
             for line in generate_ascii_line_graph(patterns['by_date'], graph_height=28, graph_width=28):
                 f.write(line + "\n")
+            f.write("```\n")
             
             # Timestamp gap analysis
-            f.write("\n--- Timestamp Gap Analysis ---\n")
+            f.write("\n#### Timestamp Gap Analysis\n\n")
             gaps = patterns['timestamp_gaps']
-            f.write(f"  JSON most recent is OLDER than report: {gaps['json_older']}\n")
-            f.write(f"  JSON most recent is NEWER than report: {gaps['json_newer']}\n")
+            f.write(f"- JSON most recent is OLDER than report: {gaps['json_older']}\n")
+            f.write(f"- JSON most recent is NEWER than report: {gaps['json_newer']}\n")
             
-            # By activity level - horizontal bar chart
-            f.write("\n--- Stale Rate by Interaction Count ---\n")
-            f.write("(Interactions = user_initiated_interaction_count from JSON)\n\n")
-            
-            activity_users = patterns.get('activity_users_by_bucket', {})
             bar_width = 40  # Width of the bar in characters
-            
-            for bucket in ['0 (absent)', '1-5', '6-20', '21-50', '51-100', '101-500', '500+']:
-                data = patterns['by_activity_level'].get(bucket, {})
-                count = data.get('count', 0)
-                total_in_bucket = activity_users.get(bucket, 0)
-                bucket_gaps = data.get('gaps', [])
-                
-                if total_in_bucket > 0:
-                    rate = count / total_in_bucket * 100
-                    # Create horizontal bar (scale to 100%)
-                    filled = int(rate / 100 * bar_width)
-                    bar = '█' * filled + '░' * (bar_width - filled)
-                    
-                    # Format the label to fixed width for alignment
-                    label = f"{bucket:12}"
-                    
-                    f.write(f"  {label} |{bar}| {rate:5.1f}% ({count}/{total_in_bucket})\n")
             
             # Stale user interaction distribution
             stale_interactions = patterns.get('stale_user_interactions', [])
             if stale_interactions:
-                f.write("\n--- Stale Users: Interaction Count Distribution ---\n")
-                f.write("(How many interactions do stale users have in JSON?)\n\n")
+                f.write("\n#### Interaction Count per Stale User\n\n")
+                f.write("*(How many interactions do stale users have in JSON?)*\n\n")
+                f.write("```\n")
                 
                 # Bucket the stale users by their interaction counts
                 stale_buckets = defaultdict(int)
@@ -1131,30 +1140,41 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
                     bar = '█' * filled + '░' * (bar_width - filled)
                     label = f"{bucket:12}"
                     f.write(f"  {label} |{bar}| {pct:5.1f}% ({count}/{total_stale})\n")
+                f.write("```\n")
                 
                 avg_interactions = sum(stale_interactions) / len(stale_interactions) if stale_interactions else 0
-                f.write(f"\n  Average interactions for stale users: {avg_interactions:.1f}\n")
+                f.write(f"\n- Average interactions for stale users: **{avg_interactions:.1f}**\n")
                 
                 # Also show healthy user stats for comparison
                 healthy_interactions = patterns.get('healthy_user_interactions', [])
                 if healthy_interactions:
                     avg_healthy = sum(healthy_interactions) / len(healthy_interactions)
-                    f.write(f"  Average interactions for healthy users: {avg_healthy:.1f}\n")
+                    f.write(f"- Average interactions for healthy users: **{avg_healthy:.1f}**\n")
             
-            # Key insights based on the pattern
-            f.write("\n--- Interpretation ---\n")
-            f.write("The stale rate decreases monotonically with interaction count.\n")
-            f.write("This pattern could be explained by several factors:\n\n")
-            f.write("  1. USER-LEVEL RELIABILITY: Some users may have configurations\n")
-            f.write("     (IDE, network, auth) that make sync less reliable. These users\n")
-            f.write("     also tend to use Copilot less frequently.\n\n")
-            f.write("  2. TIMING EFFECTS: More active users have more recent JSON data,\n")
-            f.write("     reducing the window for timestamp mismatches.\n\n")
-            f.write("  3. DATA PIPELINE ISSUES: The JSON export may have intermittent\n")
-            f.write("     failures that affect all users, but active users have more\n")
-            f.write("     chances for at least one successful sync.\n\n")
-            f.write("NOTE: The data shows correlation between activity and data quality,\n")
-            f.write("but cannot definitively identify the root cause.\n")
+            # By activity level - horizontal bar chart (moved after stale distribution)
+            f.write("\n#### Discrepancy Rate by Interaction Count\n\n")
+            f.write("*(Based on interaction count, how many users have stale or absent data in JSON?)*\n\n")
+            f.write("```\n")
+            
+            activity_users = patterns.get('activity_users_by_bucket', {})
+            
+            for bucket in ['0 (absent)', '1-5', '6-20', '21-50', '51-100', '101-500', '500+']:
+                data = patterns['by_activity_level'].get(bucket, {})
+                count = data.get('count', 0)
+                total_in_bucket = activity_users.get(bucket, 0)
+                bucket_gaps = data.get('gaps', [])
+                
+                if total_in_bucket > 0:
+                    rate = count / total_in_bucket * 100
+                    # Create horizontal bar (scale to 100%)
+                    filled = int(rate / 100 * bar_width)
+                    bar = '█' * filled + '░' * (bar_width - filled)
+                    
+                    # Format the label to fixed width for alignment
+                    label = f"{bucket:12}"
+                    
+                    f.write(f"  {label} |{bar}| {rate:5.1f}% ({count}/{total_in_bucket})\n")
+            f.write("```\n")
     
     print(f"Wrote summary to {output_path}")
 
@@ -1217,7 +1237,7 @@ Examples:
     output_dir = os.path.join(args.data_dir, 'output')
     os.makedirs(output_dir, exist_ok=True)
     discrepancies_csv_path = os.path.join(output_dir, 'discrepancies.csv')
-    summary_path = os.path.join(output_dir, f'{customer_name}-summary.txt')
+    summary_path = os.path.join(output_dir, f'{customer_name}-summary.md')
     
     # Extract report generation date from activity report CSV
     report_generated_date = None
