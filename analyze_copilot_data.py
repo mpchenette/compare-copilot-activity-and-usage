@@ -117,16 +117,7 @@ MIN_VERSIONS = {
     },
 }
 
-# All copilot-chat extension versions (reverse chronological order - newest first)
-COPILOT_CHAT_VERSIONS = [
-    '0.35.1', '0.35.0',
-    '0.33.5', '0.33.4', '0.33.3', '0.33.2', '0.33.1', '0.33.0',
-    '0.32.5', '0.32.4', '0.32.3', '0.32.2', '0.32.1', '0.32.0',
-    '0.31.5', '0.31.4', '0.31.3', '0.31.2', '0.31.1', '0.31.0',
-    '0.30.3', '0.30.2', '0.30.1', '0.30.0',
-    '0.29.1', '0.29.0',
-    '0.28.5', '0.28.4', '0.28.3', '0.28.2', '0.28.1', '0.28.0',
-]
+
 
 
 def parse_version(version_str):
@@ -304,15 +295,17 @@ def parse_json_files(json_files):
         json_files: List of paths to JSON files
         
     Returns:
-        Tuple of (list of row dicts, user_timestamps dict, user_interactions dict, report_start_day, report_end_day)
+        Tuple of (list of row dicts, user_timestamps dict, user_interactions dict, report_start_day, report_end_day, all_extension_versions)
         user_timestamps maps user_login -> dict with:
             'timestamps': set of normalized timestamps
             'timestamp_to_ide': dict mapping timestamp -> IDE string
         user_interactions maps user_login -> total user_initiated_interaction_count
+        all_extension_versions is a set of copilot-chat versions seen in JSON
     """
     rows = []
     user_timestamps = defaultdict(lambda: {'timestamps': set(), 'timestamp_to_ide': {}})
     user_interactions = defaultdict(int)  # Track total interactions per user
+    all_extension_versions = set()  # Track all copilot-chat versions seen in JSON
     report_start = None
     report_end = None
     
@@ -391,6 +384,9 @@ def parse_json_files(json_files):
                                     parts.append(plugin)
                                 if plugin_version:
                                     parts.append(plugin_version)
+                                    # Track copilot-chat versions from JSON
+                                    if plugin == 'copilot-chat':
+                                        all_extension_versions.add(plugin_version)
                                 ide_str = '/'.join(parts)
                                 
                                 # Track timestamps and map to IDE strings
@@ -427,7 +423,7 @@ def parse_json_files(json_files):
                     print(f"  Warning: Error parsing JSON in {filepath}: {e}")
                     continue
     
-    return rows, user_timestamps, user_interactions, report_start, report_end
+    return rows, user_timestamps, user_interactions, report_start, report_end, all_extension_versions
 
 
 def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, report_start, report_end):
@@ -586,7 +582,7 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                             exact_match = normalized_report_ts in json_timestamps
                             
                             if not within_tolerance:
-                                # No timestamp within 1 hour - flag as mismatch
+                                # No timestamp within 24 hours - flag as mismatch
                                 stats['timestamp_mismatch_count'] += 1
                                 stats['timestamp_mismatch_surface_breakdown'][surface] += 1
                                 stats['timestamp_mismatch_extension_breakdown'][ext_version] += 1
@@ -840,18 +836,21 @@ def generate_ascii_line_graph(data_by_date, graph_height=10, graph_width=60):
     return lines
 
 
-def format_copilot_chat_breakdown(extension_breakdown, all_versions_in_report):
+def format_copilot_chat_breakdown(extension_breakdown, all_versions):
     """
     Format copilot-chat extension breakdown in reverse chronological order.
-    Only includes versions that exist in the customer's activity report.
+    Dynamically sorts versions by semantic versioning (newest first).
+    Consolidates preview builds (0.XX.202XXXXXXX) into 0.XX.PREVIEW.
     
     Args:
         extension_breakdown: Dict mapping extension string -> count (discrepancies)
-        all_versions_in_report: Set of all copilot-chat versions seen in activity report
+        all_versions: Set of all copilot-chat versions seen in data (CSV and JSON)
         
     Returns:
         List of (version_string, count) tuples in reverse chronological order
     """
+    import re
+    
     # Extract copilot-chat versions and their discrepancy counts
     discrepancy_counts = {}
     for ext, count in extension_breakdown.items():
@@ -859,15 +858,57 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions_in_report):
             version = ext.replace('copilot-chat/', '')
             discrepancy_counts[version] = count
     
-    if not all_versions_in_report:
+    if not all_versions:
         return []
     
-    # Build result with only versions present in customer data, in reverse chron order
+    # Pattern for preview builds: 0.XX.202XXXXXXX (date-based builds)
+    preview_pattern = re.compile(r'^(\d+)\.(\d+)\.202\d+$')
+    
+    # Group versions: preview builds by minor version, regular versions as-is
+    grouped_versions = {}  # key: display version, value: total count
+    version_keys = {}  # key: display version, value: sort key (major, minor, is_preview)
+    
+    for ver in all_versions:
+        count = discrepancy_counts.get(ver, 0)
+        match = preview_pattern.match(ver)
+        
+        if match:
+            # Preview build - consolidate by minor version
+            major = int(match.group(1))
+            minor = int(match.group(2))
+            display_ver = f"{major}.{minor}.PREVIEW"
+            
+            if display_ver not in grouped_versions:
+                grouped_versions[display_ver] = 0
+                # Sort key: (major, minor, 1) where 1 means "after stable"
+                version_keys[display_ver] = (major, minor, 1)
+            
+            grouped_versions[display_ver] += count
+        else:
+            # Regular version - keep as-is
+            display_ver = ver
+            parts = ver.split('.')
+            if len(parts) >= 2 and parts[0].isdigit() and parts[1].isdigit():
+                major = int(parts[0])
+                minor = int(parts[1])
+                patch = int(parts[2]) if len(parts) >= 3 and parts[2].isdigit() else 0
+                # Sort key: (major, minor, 0, patch) where 0 means "before preview"
+                version_keys[display_ver] = (major, minor, 0, patch)
+            else:
+                version_keys[display_ver] = (0, 0, 0, 0)
+            
+            grouped_versions[display_ver] = count
+    
+    # Sort by version keys (newest first)
+    sorted_versions = sorted(grouped_versions.keys(), 
+                            key=lambda v: version_keys.get(v, (0, 0, 0, 0)), 
+                            reverse=True)
+    
+    # Build result
     result = []
-    for ver in COPILOT_CHAT_VERSIONS:
-        if ver in all_versions_in_report:
-            count = discrepancy_counts.get(ver, 0)
-            result.append((f"copilot-chat/{ver}", count))
+    for ver in sorted_versions:
+        count = grouped_versions[ver]
+        result.append((f"copilot-chat/{ver}", count))
     
     return result
 
@@ -889,7 +930,7 @@ def write_discrepancies_csv(discrepancies, fieldnames, output_path):
     print(f"Wrote {len(discrepancies)} discrepancies to {output_path}")
 
 
-def write_summary(stats, report_start, report_end_original, report_end_analysis, distilled_users_count, distilled_users_analysis_count, output_path, patterns=None, customer_name=None):
+def write_summary(stats, report_start, report_end_original, report_end_analysis, distilled_users_count, distilled_users_analysis_count, output_path, patterns=None, customer_name=None, all_extension_versions=None):
     """
     Write summary statistics to a text file.
     
@@ -903,6 +944,7 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         output_path: Path to output summary file
         patterns: Optional pattern analysis dict
         customer_name: Customer name for the report header
+        all_extension_versions: Set of all copilot-chat versions seen in CSV and JSON
     """
     with open(output_path, 'w') as f:
         if customer_name:
@@ -1003,11 +1045,12 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         
         f.write("\n### Patterns\n\n")
         f.write("#### Absent Events\n\n")
-        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], stats['all_copilot_chat_versions']):
+        versions_to_use = all_extension_versions if all_extension_versions else stats['all_copilot_chat_versions']
+        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], versions_to_use):
             f.write(f"- {ext}: {count:,}\n")
         
         f.write("\n#### Stale Events\n\n")
-        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], stats['all_copilot_chat_versions']):
+        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], versions_to_use):
             f.write(f"- {ext}: {count:,}\n")
         
         # Add pattern analysis if available
@@ -1186,7 +1229,7 @@ Examples:
     
     # Step 1: Parse JSON files
     print("\nStep 1: Parsing JSON files...")
-    rows, user_timestamps, user_interactions, report_start, report_end = parse_json_files(json_files)
+    rows, user_timestamps, user_interactions, report_start, report_end, json_extension_versions = parse_json_files(json_files)
     
     if not rows:
         print("Error: No data extracted from JSON files.")
@@ -1239,7 +1282,10 @@ Examples:
     # Step 4: Write outputs
     print("\nStep 4: Writing output files...")
     write_discrepancies_csv(all_discrepancies, output_fieldnames, discrepancies_csv_path)
-    write_summary(stats, report_start, report_end, effective_end, len(distilled_users), len(distilled_users_analysis), summary_path, patterns, customer_name_display)
+    # Combine extension versions from CSV and JSON
+    all_extension_versions = stats['all_copilot_chat_versions'] | json_extension_versions
+    
+    write_summary(stats, report_start, report_end, effective_end, len(distilled_users), len(distilled_users_analysis), summary_path, patterns, customer_name_display, all_extension_versions)
     
     # Print summary to console
     print("\n" + "=" * 60)
