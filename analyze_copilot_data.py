@@ -806,10 +806,10 @@ def generate_ascii_line_graph(data_by_date, graph_height=10, graph_width=60):
             else:
                 row_chars.append(' ')
         
-        lines.append(f"  {label} │{' '.join(row_chars)}")
+        lines.append(f"  {label} │{'  '.join(row_chars)}")
     
     # X-axis
-    x_axis = f"  {' ' * y_label_width} └{'──' * len(totals)}"
+    x_axis = f"  {' ' * y_label_width} └{'───' * len(totals)}"
     lines.append(x_axis)
     
     # Date labels (start, middle, end)
@@ -820,7 +820,7 @@ def generate_ascii_line_graph(data_by_date, graph_height=10, graph_width=60):
         mid_date = sorted_dates[mid_idx][5:] if mid_idx < len(sorted_dates) else ''
         
         # Position the labels (account for spaces between columns)
-        graph_width = len(totals) * 2 - 1  # Each column + space between
+        graph_width = len(totals) * 3 - 1  # Each column + 2 spaces between
         mid_pos = graph_width // 2 - 2
         
         # Simple label line
@@ -1046,11 +1046,11 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         f.write("\n### Patterns\n\n")
         f.write("#### Absent Events\n\n")
         versions_to_use = all_extension_versions if all_extension_versions else stats['all_copilot_chat_versions']
-        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], versions_to_use):
+        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], versions_to_use)[:20]:
             f.write(f"- {ext}: {count:,}\n")
         
         f.write("\n#### Stale Events\n\n")
-        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], versions_to_use):
+        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], versions_to_use)[:20]:
             f.write(f"- {ext}: {count:,}\n")
         
         # Add pattern analysis if available
