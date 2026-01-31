@@ -3,7 +3,7 @@
 Copilot Usage Data Analyzer
 
 This script performs two main functions:
-1. Ingests multiple JSON/NDJSON files containing Copilot usage data and combines 
+1. Ingests multiple JSON files containing Copilot usage data and combines 
    them into a single distilled CSV with key fields.
 2. Compares the distilled data against an activity report CSV to identify 
    discrepancies - users who show activity in the activity report within the 
@@ -88,6 +88,25 @@ IDE_CATEGORIES = {
     'visualstudio': 'Visual Studio',
 }
 
+# Non-IDE surfaces (web, CLI, mobile, platform features)
+# These surfaces don't have version info and won't appear in JSON export
+# JSON data today only includes IDE usage
+NON_IDE_SURFACES = {
+    'copilot-chat',           # GitHub.com web chat
+    'copilot-chat-platform',  # Platform chat
+    'copilot-cli',            # CLI tool
+    'copilot_pr_review',      # PR review feature
+    'copilot-pr-reviews',     # PR reviews (alternate name)
+    'copilot-developer',      # Developer feature
+    'copilot-mobile-ios',     # iOS mobile app
+    'copilot-mobile-android', # Android mobile app
+    'github_spark',           # GitHub Spark
+    'github.com',             # GitHub.com
+    'none',                   # No surface
+    '/unknown',               # Invalid format
+    '',                       # Empty
+}
+
 # Minimum supported versions for Copilot usage metrics
 # Users on older versions will NOT appear in the JSON export by design
 # Source: https://docs.github.com/en/enterprise-cloud@latest/copilot/rolling-out-github-copilot-at-scale/analyzing-usage-over-time-with-the-copilot-metrics-api
@@ -118,6 +137,37 @@ MIN_VERSIONS = {
 }
 
 
+
+
+def is_ide_surface(surface_str):
+    """Check if a surface string represents an IDE (vs web, CLI, mobile, etc).
+    
+    Returns True if the surface is an IDE that should have version info.
+    Returns False for non-IDE surfaces like web chat, CLI, mobile apps.
+    """
+    if not surface_str:
+        return False
+    
+    # Get the base surface name (first part before /)
+    parts = surface_str.split('/')
+    base_surface = parts[0].lower().strip()
+    
+    # Check if it's a known non-IDE surface
+    if base_surface in NON_IDE_SURFACES:
+        return False
+    
+    # Check if it looks like an IDE surface (has version info structure)
+    # IDE surfaces typically have format: ide_name/version/... with at least 2 parts
+    if len(parts) >= 2 and parts[1]:  # Has version component
+        return True
+    
+    # "unknown/GitHubCopilotChat/..." is VS Code with unidentified IDE
+    if base_surface == 'unknown' and len(parts) >= 2:
+        if 'copilot' in parts[1].lower():
+            return True
+    
+    # Single-word surfaces without version info are non-IDE
+    return False
 
 
 def parse_version(version_str):
@@ -315,7 +365,7 @@ def parse_json_files(json_files):
         with open(filepath, 'r') as f:
             content = f.read()
             
-        # Handle NDJSON format (newline-delimited JSON)
+        # Handle JSON format
         lines = content.strip().split('\n')
         
         for line in lines:
@@ -456,6 +506,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'users_active_before_window': 0,
         'users_active_in_window': 0,
         'users_active_after_window': 0,
+        'users_non_ide': 0,           # Users with non-IDE surfaces (web, CLI, mobile)
+        'users_ide': 0,               # Users with IDE surfaces
         'users_unsupported_version': 0,
         'missing_count': 0,
         'timestamp_mismatch_count': 0,
@@ -464,7 +516,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'missing_extension_breakdown': defaultdict(int),
         'timestamp_mismatch_extension_breakdown': defaultdict(int),
         'unsupported_version_breakdown': defaultdict(int),
-        'all_copilot_chat_versions': set()  # Track all versions seen in activity report
+        'all_copilot_chat_versions': set(),  # Track all versions seen in activity report
+        'users_per_extension_version': defaultdict(int)  # Track total users per extension in analysis window
     }
     
     with open(activity_report_path, 'r') as f:
@@ -511,6 +564,14 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         if surface.lower() == 'neovim':
                             continue
                         
+                        # Check if this is an IDE surface vs non-IDE (web, CLI, mobile)
+                        # Non-IDE surfaces don't have version info and won't appear in JSON
+                        if not is_ide_surface(last_surface):
+                            stats['users_non_ide'] += 1
+                            continue
+                        
+                        stats['users_ide'] += 1
+                        
                         # Skip users on unsupported IDE/extension versions
                         # These users will NOT appear in JSON export by design
                         is_supported, unsupported_reason = is_version_supported(last_surface)
@@ -546,6 +607,9 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                                     stats['all_copilot_chat_versions'].add(ext_ver)
                             elif len(surface_parts) >= 2:
                                 ext_version = surface_parts[0]
+                        
+                        # Track total users per extension version (for percentage calculation)
+                        stats['users_per_extension_version'][ext_version] += 1
                         
                         # Check if NOT in JSON data at all
                         if login not in distilled_users:
@@ -836,7 +900,7 @@ def generate_ascii_line_graph(data_by_date, graph_height=10, graph_width=60):
     return lines
 
 
-def format_copilot_chat_breakdown(extension_breakdown, all_versions):
+def format_copilot_chat_breakdown(extension_breakdown, all_versions, users_per_extension=None):
     """
     Format copilot-chat extension breakdown in reverse chronological order.
     Dynamically sorts versions by semantic versioning (newest first).
@@ -845,9 +909,10 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
     Args:
         extension_breakdown: Dict mapping extension string -> count (discrepancies)
         all_versions: Set of all copilot-chat versions seen in data (CSV and JSON)
+        users_per_extension: Optional dict mapping extension string -> total users count
         
     Returns:
-        List of (version_string, count) tuples in reverse chronological order
+        List of (version_string, count, total_users) tuples in reverse chronological order
     """
     import re
     
@@ -858,6 +923,14 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
             version = ext.replace('copilot-chat/', '')
             discrepancy_counts[version] = count
     
+    # Extract total user counts per version
+    total_user_counts = {}
+    if users_per_extension:
+        for ext, count in users_per_extension.items():
+            if ext.startswith('copilot-chat/'):
+                version = ext.replace('copilot-chat/', '')
+                total_user_counts[version] = count
+    
     if not all_versions:
         return []
     
@@ -865,11 +938,13 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
     preview_pattern = re.compile(r'^(\d+)\.(\d+)\.202\d+$')
     
     # Group versions: preview builds by minor version, regular versions as-is
-    grouped_versions = {}  # key: display version, value: total count
+    grouped_versions = {}  # key: display version, value: discrepancy count
+    grouped_totals = {}    # key: display version, value: total user count
     version_keys = {}  # key: display version, value: sort key (major, minor, is_preview)
     
     for ver in all_versions:
         count = discrepancy_counts.get(ver, 0)
+        total = total_user_counts.get(ver, 0)
         match = preview_pattern.match(ver)
         
         if match:
@@ -880,10 +955,12 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
             
             if display_ver not in grouped_versions:
                 grouped_versions[display_ver] = 0
+                grouped_totals[display_ver] = 0
                 # Sort key: (major, minor, 1) where 1 means "after stable"
                 version_keys[display_ver] = (major, minor, 1)
             
             grouped_versions[display_ver] += count
+            grouped_totals[display_ver] += total
         else:
             # Regular version - keep as-is
             display_ver = ver
@@ -898,6 +975,7 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
                 version_keys[display_ver] = (0, 0, 0, 0)
             
             grouped_versions[display_ver] = count
+            grouped_totals[display_ver] = total
     
     # Sort by version keys (newest first)
     sorted_versions = sorted(grouped_versions.keys(), 
@@ -908,7 +986,8 @@ def format_copilot_chat_breakdown(extension_breakdown, all_versions):
     result = []
     for ver in sorted_versions:
         count = grouped_versions[ver]
-        result.append((f"copilot-chat/{ver}", count))
+        total = grouped_totals.get(ver, 0)
+        result.append((f"copilot-chat/{ver}", count, total))
     
     return result
 
@@ -930,7 +1009,7 @@ def write_discrepancies_csv(discrepancies, fieldnames, output_path):
     print(f"Wrote {len(discrepancies)} discrepancies to {output_path}")
 
 
-def write_summary(stats, report_start, report_end_original, report_end_analysis, distilled_users_count, distilled_users_analysis_count, output_path, patterns=None, customer_name=None, all_extension_versions=None):
+def write_summary(stats, report_start, report_end_original, report_end_analysis, distilled_users_count, distilled_users_analysis_count, output_path, patterns=None, customer_name=None, all_extension_versions=None, buffer_hours=96):
     """
     Write summary statistics to a text file.
     
@@ -938,13 +1017,14 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         stats: Statistics dict
         report_start: Report start date
         report_end_original: Original report end date from JSON
-        report_end_analysis: Analysis end date (96 hours before activity report)
+        report_end_analysis: Analysis end date (buffer hours before activity report)
         distilled_users_count: Number of unique users in original JSON window
         distilled_users_analysis_count: Number of unique users in analysis window
         output_path: Path to output summary file
         patterns: Optional pattern analysis dict
         customer_name: Customer name for the report header
         all_extension_versions: Set of all copilot-chat versions seen in CSV and JSON
+        buffer_hours: Hours trimmed from report window (default: 96)
     """
     with open(output_path, 'w') as f:
         if customer_name:
@@ -956,7 +1036,7 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         f.write("### Report Window\n\n")
         f.write(f"- Original: {report_start} to {report_end_original}\n")
         f.write(f"- Trimmed: **{report_start} to {report_end_analysis}** ← ANALYSIS\n\n")
-        f.write("NOTE: Trimmed 96 hours before activity report generation for analysis\n\n")
+        f.write(f"NOTE: Trimmed {buffer_hours} hours before activity report generation for analysis\n\n")
         f.write(f"- Unique users in original window: **{distilled_users_count:,}**\n")
         f.write(f"- Unique users in analysis window: **{distilled_users_analysis_count:,}** ← ANALYSIS\n")
         
@@ -979,15 +1059,25 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
             else:
                 f.write("NOTE: Scope of analysis is limited as majority of active users fall outside of analysis window (after)\n\n")
         
-        # Supported vs unsupported version breakdown for users in analysis window
+        # IDE vs non-IDE breakdown for users in analysis window
         users_in_window = stats['users_active_in_window']
-        unsupported_count = stats.get('users_unsupported_version', 0)
-        supported_count = users_in_window - unsupported_count
+        users_non_ide = stats.get('users_non_ide', 0)
+        users_ide = stats.get('users_ide', 0)
         if users_in_window > 0:
-            unsupported_pct = (unsupported_count / users_in_window * 100)
-            supported_pct = (supported_count / users_in_window * 100)
-            f.write(f"- % of analysis users on unsupported versions: {unsupported_pct:.1f}% ({unsupported_count:,} / {users_in_window:,})\n")
-            f.write(f"- % of analysis users on supported versions: **{supported_pct:.1f}%** ({supported_count:,} / {users_in_window:,}) ← ANALYSIS\n")
+            non_ide_pct = (users_non_ide / users_in_window * 100)
+            ide_pct = (users_ide / users_in_window * 100)
+            f.write(f"- % of analysis users with non-IDE latest activity: {non_ide_pct:.1f}% ({users_non_ide:,} / {users_in_window:,})\n")
+            f.write(f"- % of analysis users with IDE latest activity: **{ide_pct:.1f}%** ({users_ide:,} / {users_in_window:,}) ← ANALYSIS\n\n")
+            f.write("NOTE: JSON data is IDE-only today\n")
+        
+        # Supported vs unsupported version breakdown for IDE users only
+        unsupported_count = stats.get('users_unsupported_version', 0)
+        supported_count = users_ide - unsupported_count
+        if users_ide > 0:
+            unsupported_pct = (unsupported_count / users_ide * 100)
+            supported_pct = (supported_count / users_ide * 100)
+            f.write(f"\n- % of IDE users on unsupported versions: {unsupported_pct:.1f}% ({unsupported_count:,} / {users_ide:,})\n")
+            f.write(f"- % of IDE users on supported versions: **{supported_pct:.1f}%** ({supported_count:,} / {users_ide:,}) ← ANALYSIS\n")
         
         # Calculate total discrepancies and affected user percentage
         # Use total users with activity (not just window) since 96-hour buffer excludes recent active users
@@ -1001,8 +1091,10 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         vscode_pct = (vscode_total / total_discrepancies * 100) if total_discrepancies > 0 else 0
         
         # Calculate supported users for event missing percentages
+        # Only count IDE users who are on supported versions
+        users_ide = stats.get('users_ide', 0)
         unsupported_in_window = stats.get('users_unsupported_version', 0)
-        supported_in_window = stats['users_active_in_window'] - unsupported_in_window
+        supported_in_window = users_ide - unsupported_in_window
         
         f.write("\n## Analysis\n\n")
         
@@ -1046,12 +1138,21 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         f.write("\n### Patterns\n\n")
         f.write("#### Absent Events\n\n")
         versions_to_use = all_extension_versions if all_extension_versions else stats['all_copilot_chat_versions']
-        for ext, count in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], versions_to_use)[:20]:
-            f.write(f"- {ext}: {count:,}\n")
+        users_per_ext = stats.get('users_per_extension_version', {})
+        for ext, count, total_users in format_copilot_chat_breakdown(stats['missing_extension_breakdown'], versions_to_use, users_per_ext)[:20]:
+            if total_users > 0:
+                pct = count / total_users * 100
+                f.write(f"- {ext}: {count:,} ({pct:.1f}% of {total_users:,} users)\n")
+            else:
+                f.write(f"- {ext}: {count:,}\n")
         
         f.write("\n#### Stale Events\n\n")
-        for ext, count in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], versions_to_use)[:20]:
-            f.write(f"- {ext}: {count:,}\n")
+        for ext, count, total_users in format_copilot_chat_breakdown(stats['timestamp_mismatch_extension_breakdown'], versions_to_use, users_per_ext)[:20]:
+            if total_users > 0:
+                pct = count / total_users * 100
+                f.write(f"- {ext}: {count:,} ({pct:.1f}% of {total_users:,} users)\n")
+            else:
+                f.write(f"- {ext}: {count:,}\n")
         
         # Add pattern analysis if available
         if patterns:
@@ -1157,6 +1258,13 @@ Examples:
         help='Directory containing JSON usage files and activity report CSV'
     )
     
+    parser.add_argument(
+        '--buffer-hours', '-b',
+        type=int,
+        default=96,
+        help='Hours to trim from report window end (default: 96). JSON export has a delay before data populates.'
+    )
+    
     args = parser.parse_args()
     
     # Validate directory exists
@@ -1210,9 +1318,10 @@ Examples:
         print("Warning: Could not find Report Time in activity report, using current date")
         report_generated_date = datetime.now().strftime('%Y-%m-%d')
     
-    # Calculate cutoff date (96 hours before report generation) - JSON export has a delay
+    # Calculate cutoff date (buffer hours before report generation) - JSON export has a delay
+    buffer_hours = args.buffer_hours
     report_datetime = datetime.strptime(report_generated_date, '%Y-%m-%d')
-    cutoff_datetime = report_datetime - timedelta(hours=JSON_EXPORT_DELAY_HOURS)
+    cutoff_datetime = report_datetime - timedelta(hours=buffer_hours)
     cutoff_date = cutoff_datetime.strftime('%Y-%m-%d')
     
     print("\n" + "=" * 60)
@@ -1224,8 +1333,8 @@ Examples:
     print(f"JSON files: {len(json_files)}")
     print(f"Activity report: {os.path.basename(activity_report_path)}")
     print(f"Activity report generated: {report_generated_date}")
-    print(f"\nNote: Only analyzing activity > 96 hours before report generation (before {cutoff_date})")
-    print(f"      JSON export has a {JSON_EXPORT_DELAY_HOURS}-hour delay before data populates.")
+    print(f"\nNote: Only analyzing activity > {buffer_hours} hours before report generation (before {cutoff_date})")
+    print(f"      JSON export has a {buffer_hours}-hour delay before data populates.")
     
     # Step 1: Parse JSON files
     print("\nStep 1: Parsing JSON files...")
@@ -1285,13 +1394,13 @@ Examples:
     # Combine extension versions from CSV and JSON
     all_extension_versions = stats['all_copilot_chat_versions'] | json_extension_versions
     
-    write_summary(stats, report_start, report_end, effective_end, len(distilled_users), len(distilled_users_analysis), summary_path, patterns, customer_name_display, all_extension_versions)
+    write_summary(stats, report_start, report_end, effective_end, len(distilled_users), len(distilled_users_analysis), summary_path, patterns, customer_name_display, all_extension_versions, buffer_hours)
     
     # Print summary to console
     print("\n" + "=" * 60)
     print(f"{customer_name_display.upper()} - SUMMARY")
     print("=" * 60)
-    print(f"Analysis Window: {report_start} to {effective_end} (96-hour buffer applied)")
+    print(f"Analysis Window: {report_start} to {effective_end} ({buffer_hours}-hour buffer applied)")
     print(f"Unique users in JSON data: {len(distilled_users):,}")
     print(f"Total users in activity report: {stats['total_activity_users']:,}")
     print(f"Users active within report window: {stats['users_active_in_window']:,}")
