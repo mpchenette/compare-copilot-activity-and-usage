@@ -517,7 +517,8 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
         'timestamp_mismatch_extension_breakdown': defaultdict(int),
         'unsupported_version_breakdown': defaultdict(int),
         'all_copilot_chat_versions': set(),  # Track all versions seen in activity report
-        'users_per_extension_version': defaultdict(int)  # Track total users per extension in analysis window
+        'users_per_extension_version': defaultdict(int),  # Track total users per extension in analysis window
+        'users_per_ide_category': defaultdict(int),  # Track total users per IDE category in analysis window
     }
     
     with open(activity_report_path, 'r') as f:
@@ -610,6 +611,10 @@ def find_discrepancies(distilled_rows, user_timestamps, activity_report_path, re
                         
                         # Track total users per extension version (for percentage calculation)
                         stats['users_per_extension_version'][ext_version] += 1
+                        
+                        # Track total users per IDE category (for percentage calculation)
+                        ide_category = IDE_CATEGORIES.get(surface.lower(), 'Other')
+                        stats['users_per_ide_category'][ide_category] += 1
                         
                         # Check if NOT in JSON data at all
                         if login not in distilled_users:
@@ -1121,19 +1126,23 @@ def write_summary(stats, report_start, report_end_original, report_end_analysis,
         # Add IDE breakdown section
         f.write("\n### IDEs\n\n")
         
+        # Get users per IDE category from stats
+        users_per_ide = stats.get('users_per_ide_category', {})
+        
         # Sort by total descending
         sorted_ides = sorted(ide_stats.items(), key=lambda x: x[1]['absent'] + x[1]['stale'], reverse=True)
         for ide, counts in sorted_ides:
             absent = counts['absent']
             stale = counts['stale']
             total = absent + stale
-            if total > 0:
-                pct_of_total = total / total_discrepancies * 100 if total_discrepancies > 0 else 0
-                pct_absent = absent / total * 100
-                pct_stale = stale / total * 100
-                f.write(f"- % issues from {ide}: **{pct_of_total:.1f}%** ({total:,} / {total_discrepancies:,})\n")
-                f.write(f"  - % absent: {pct_absent:.1f}% ({absent:,} / {total:,})\n")
-                f.write(f"  - % stale: {pct_stale:.1f}% ({stale:,} / {total:,})\n")
+            ide_users = users_per_ide.get(ide, 0)
+            if total > 0 and ide_users > 0:
+                pct_of_ide_users = total / ide_users * 100
+                pct_absent = absent / ide_users * 100
+                pct_stale = stale / ide_users * 100
+                f.write(f"- % discrepancy rate for {ide}: **{pct_of_ide_users:.1f}%** ({total:,} / {ide_users:,})\n")
+                f.write(f"  - % absent: {pct_absent:.1f}% ({absent:,} / {ide_users:,})\n")
+                f.write(f"  - % stale: {pct_stale:.1f}% ({stale:,} / {ide_users:,})\n")
         
         f.write("\n### Patterns\n\n")
         f.write("#### Absent Events\n\n")
