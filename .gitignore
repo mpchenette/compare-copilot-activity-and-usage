@@ -1,7 +1,7 @@
 # macOS
 .DS_Store
 
-# Data files (customer-specific, do not commit)
+# Data files
 *.json
 *.csv
 *.txt
@@ -10,5 +10,4 @@ __pycache__/
 v*/
 202*-**-**/
 
-# Output directory
-analysis-output/
+consolidated-data/
